@@ -30,7 +30,6 @@ import random
 import re
 from typing import Any, Optional
 from urllib.parse import urlparse
-
 from apify import Actor
 from crawlee.events import Event
 from patchright.async_api import async_playwright, Page
