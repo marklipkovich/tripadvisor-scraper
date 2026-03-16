@@ -15,6 +15,12 @@
 				}
 			]
 		},
+		"startDate": {
+			"title": "Start Date",
+			"type": "string",
+			"description": "Only include reviews published on or after this date (YYYY-MM-DD). Leave empty for all reviews.",
+			"default": ""
+		},
 		"maxReviewsPerPlace": {
 			"title": "Max Reviews per Place",
 			"type": "integer",

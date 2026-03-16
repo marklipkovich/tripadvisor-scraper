@@ -10,13 +10,11 @@
 					"source",
 					"_type",
 					"name",
-					"url",
 					"rating",
 					"review_count",
 					"title",
 					"text",
 					"date",
-					"place_name",
 					"place_url"
 				]
 			},
@@ -34,10 +32,6 @@
 					"name": {
 						"label": "Place Name",
 						"format": "text"
-					},
-					"url": {
-						"label": "URL",
-						"format": "link"
 					},
 					"rating": {
 						"label": "Rating",
@@ -57,10 +51,6 @@
 					},
 					"date": {
 						"label": "Date",
-						"format": "text"
-					},
-					"place_name": {
-						"label": "Place Name",
 						"format": "text"
 					},
 					"place_url": {
@@ -133,7 +123,7 @@
 				"fields": [
 					"source",
 					"_type",
-					"place_name",
+					"name",
 					"title",
 					"text",
 					"rating",
@@ -155,7 +145,7 @@
 						"label": "Type",
 						"format": "text"
 					},
-					"place_name": {
+					"name": {
 						"label": "Place",
 						"format": "text"
 					},

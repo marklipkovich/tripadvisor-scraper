@@ -3,11 +3,17 @@
 	"actorOutputSchemaVersion": 1,
 	"title": "TripAdvisor Reviews Scraper Output",
 	"properties": {
-		"results": {
+		"dataset": {
 			"type": "string",
-			"title": "Results",
-			"description": "Place profiles and reviews in the default dataset",
+			"title": "Reviews",
+			"description": "Reviews in the default dataset",
 			"template": "{{links.apiDefaultDatasetUrl}}/items"
+		},
+		"keyValueStore": {
+			"type": "string",
+			"title": "Places",
+			"description": "Place metadata (reviewCount, oldestDate, error) in key-value store",
+			"template": "{{links.apiDefaultKeyValueStoreUrl}}/keys"
 		}
 	}
 }

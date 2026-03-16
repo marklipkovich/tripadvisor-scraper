@@ -118,7 +118,7 @@ _MONTH_NAMES = {
 
 def _date_sort_key(item: dict) -> tuple:
     """Return (year, month) for sorting; newest first. Empty/unparseable -> (0, 0)."""
-    raw = (item.get("date") or "").strip()
+    raw = (item.get("date") or item.get("publishedDate") or "").strip()
     if not raw:
         return (0, 0)
     # ISO: "2026-01-24T15:06:21.384Z" or "2025-12-21"
@@ -160,6 +160,15 @@ def _log_graphql_keys(resp: Any, label: str) -> None:
                     Actor.log.info(f"  [{label}] response[{i}] data keys: {keys}")
     except Exception:
         pass
+
+
+def _safe_avatar_url(user: Any) -> str:
+    """Safely extract avatar URL from user.avatar.data.photoSizeDynamic.urlTemplate."""
+    av = (user.get("avatar") or {}) if isinstance(user, dict) else {}
+    data = (av.get("data") or {}) if isinstance(av, dict) else {}
+    psd = (data.get("photoSizeDynamic") or {}) if isinstance(data, dict) else {}
+    url = (psd.get("urlTemplate") or "") if isinstance(psd, dict) else ""
+    return url.replace("{width}", "100").replace("{height}", "100") if url else ""
 
 
 def dig(obj: Any, *keys, default: Any = None) -> Any:
@@ -235,7 +244,6 @@ def parse_place_from_jsonld(ld: dict, url: str) -> dict:
         review_count = 0
 
     return {
-        "_type": "place",
         "url": url,
         "name": ld.get("name") or "",
         "place_type": ld.get("@type") or "LodgingBusiness",
@@ -530,10 +538,10 @@ async def extract_page_data(page: Page, url: str) -> tuple[Optional[dict], list[
     if isinstance(place, dict):
         place_obj = parse_place_from_jsonld(place, url)
     elif place:
-        place_obj = {"_type": "place", "url": url, "name": str(place)}
+        place_obj = {"url": url, "name": str(place)}
 
     if not place_obj:
-        place_obj = {"_type": "place", "url": url, "name": "", "review_count": 0}
+        place_obj = {"url": url, "name": "", "review_count": 0}
 
     reviews: list[dict] = []
     for r in reviews_raw:
@@ -763,12 +771,14 @@ def parse_reviews_from_graphql(data: list) -> list[dict]:
                 if not text and not r.get("title"):
                     continue
                 user = r.get("user") or r.get("userProfile") or r.get("author") or {}
+                if not isinstance(user, dict):
+                    user = {}
                 name = (
                     user.get("displayName")
                     or user.get("name")
                     or user.get("username")
                     or ""
-                ) if isinstance(user, dict) else ""
+                )
                 rating = r.get("rating")
                 if rating is None and isinstance(r.get("tripInfo"), dict):
                     rating = r.get("tripInfo", {}).get("rating")
@@ -780,23 +790,85 @@ def parse_reviews_from_graphql(data: list) -> list[dict]:
                     or ""
                 )
                 rid = str(r.get("id") or r.get("reviewId") or r.get("objectId") or len(results))
+                loc = r.get("location") or {}
+                if not isinstance(loc, dict):
+                    loc = {}
+                review_url = ""
+                if isinstance(loc, dict) and loc.get("url"):
+                    review_url = "https://www.tripadvisor.com" + str(loc.get("url", "")).split("#")[0]
+                else:
+                    detail = r.get("reviewDetailPageWrapper") or {}
+                    route = (detail.get("reviewDetailPageRoute") or {}) if isinstance(detail, dict) else {}
+                    if route.get("url"):
+                        review_url = "https://www.tripadvisor.com" + str(route.get("url", ""))
+                trip_info = r.get("tripInfo") or {}
+                stay_date = trip_info.get("stayDate") or "" if isinstance(trip_info, dict) else ""
+                if stay_date and len(stay_date) >= 7:
+                    travel_date = stay_date[:7]
+                else:
+                    travel_date = str(date_val)[:7] if date_val else ""
+                contrib = user.get("contributionCounts") or {} if isinstance(user, dict) else {}
+                mgmt = r.get("mgmtResponse") or {}
+                owner_resp = None
+                if isinstance(mgmt, dict) and mgmt.get("text"):
+                    owner_resp = {
+                        "id": str(mgmt.get("id") or ""),
+                        "title": "Owner Response",
+                        "text": (mgmt.get("text") or "").strip()[:2000],
+                        "lang": mgmt.get("language") or "en",
+                        "publishedDate": mgmt.get("publishedDate") or "",
+                        "responder": (mgmt.get("userProfile") or {}).get("displayName") or "",
+                    }
+                addl = r.get("additionalRatings") or []
+                subratings = []
+                if isinstance(addl, list):
+                    for a in addl:
+                        if isinstance(a, dict) and a.get("ratingLabelLocalizedString"):
+                            subratings.append({
+                                "name": a.get("ratingLabelLocalizedString"),
+                                "value": int(a.get("rating") or 0),
+                            })
+                photos_raw = r.get("photos") or []
+                photos_list = []
+                if isinstance(photos_raw, list):
+                    for p in photos_raw:
+                        ph = p.get("photo") if isinstance(p, dict) else p
+                        if isinstance(ph, dict):
+                            dyn = ph.get("photoSizeDynamic") or {}
+                            url_tpl = dyn.get("urlTemplate") or ""
+                            if url_tpl:
+                                photos_list.append({
+                                    "id": str(ph.get("id") or ""),
+                                    "image": url_tpl.replace("{width}", "640").replace("{height}", "480"),
+                                })
+                place_info = {
+                    "id": str(loc.get("locationId") or r.get("locationId") or ""),
+                    "name": loc.get("name") or "",
+                    "webUrl": "https://www.tripadvisor.com" + str(loc.get("url") or ""),
+                } if isinstance(loc, dict) else {}
                 results.append({
-                    "_type": "review",
-                    "source": "review",
-                    "review_id": rid,
+                    "id": rid,
                     "title": (r.get("title") or "").strip(),
+                    "lang": r.get("language") or "en",
+                    "locationId": str(loc.get("locationId") or r.get("locationId") or ""),
+                    "publishedDate": str(date_val)[:50] if date_val else "",
+                    "publishedPlatform": r.get("publishPlatform"),
+                    "rating": int(rating) if rating is not None else None,
+                    "helpfulVotes": int(r.get("helpfulVotes") or r.get("helpful_votes") or 0),
+                    "travelDate": travel_date,
                     "text": (text or "").strip() if isinstance(text, str) else str(text).strip(),
-                    "rating": float(rating) if rating is not None else None,
+                    "user": {
+                        "userId": user.get("id") or "",
+                        "displayName": name,
+                        "username": user.get("username") or "",
+                        "avatar": _safe_avatar_url(user),
+                        "contributions": contrib,
+                    } if isinstance(user, dict) else {},
+                    "ownerResponse": owner_resp,
+                    "subratings": subratings,
+                    "photos": photos_list,
+                    "placeInfo": place_info,
                     "date": str(date_val)[:50] if date_val else "",
-                    "trip_type": (r.get("tripType") or (r.get("tripInfo") or {}).get("tripType") or ""),
-                    "reviewer_name": name,
-                "helpful_votes": int(r.get("helpfulVotes") or r.get("helpful_votes") or 0),
-                "management_response": (
-                    (r.get("mgmtResponse") or {}).get("text")
-                    or r.get("managementResponse")
-                    or r.get("management_response")
-                    or ""
-                ).strip()[:2000] or "",
                 })
         # Fallback: recursively search for review-like objects in the response
         if not results:
@@ -826,24 +898,33 @@ def build_pagination_url(base_url: str, offset: int) -> str:
 
 REVIEWS_PER_PAGE = 10
 
+# Change this to adjust parallel GraphQL requests (line ~829)
+PARALLEL_REQUESTS = 5
+
+# Batch size for pushing reviews to dataset (line ~830)
+PUSH_BATCH_SIZE = 50
+
 
 async def scrape_place(
     playwright,
     place_url: str,
     max_reviews: Optional[int],
     proxy_url: Optional[str],
-) -> tuple[Optional[dict], list[dict]]:
+    start_date: Optional[str] = None,
+    place_idx: int = 1,
+    total_places: int = 1,
+) -> tuple[Optional[dict], int]:
     """
     Scrape a single TripAdvisor place (hotel, restaurant, attraction).
-    Returns (place_dict, list_of_review_dicts).
+    Pushes reviews to dataset in batches as they are scraped.
+    Returns (place_dict, total_reviews_pushed).
     """
     place_url = normalize_place_url(place_url)
     if not place_url:
         Actor.log.warning(f"  Invalid URL: {place_url}")
-        return None, []
+        return None, 0
 
-    Actor.log.info(f"  Place URL: {place_url}")
-    await Actor.set_status_message(f"Loading {place_url} …")
+    await Actor.set_status_message("Loading …")
 
     browser, context = await make_context(playwright, proxy_url)
     page = await context.new_page()
@@ -870,7 +951,7 @@ async def scrape_place(
 
     try:
         # ── Phase 1: Navigate and extract first page ───────────────────────
-        Actor.log.info(f"  Navigating to {place_url}")
+        Actor.log.info("  Navigating …")
         try:
             await with_retry(
                 lambda: page.goto(place_url, wait_until="networkidle", timeout=60_000),
@@ -884,15 +965,28 @@ async def scrape_place(
 
         await asyncio.sleep(random.uniform(3.0, 5.0))
 
-        # ── Wait for captcha to be resolved (if present) ───────────────────
+        # ── Wait for page to be ready (handles captcha without detecting it) ──
+        # If captcha blocks the page, main content won't appear. We wait for it.
+        Actor.log.info("  Waiting for page to be ready …")
         try:
-            captcha = page.get_by_text("Verification Required")
-            if await captcha.is_visible(timeout=2000):
-                Actor.log.info("  Captcha detected — waiting up to 90s for manual solve (headed mode)")
-                await captcha.wait_for(state="hidden", timeout=90_000)
-                await asyncio.sleep(2.0)
+            tab = page.get_by_role("tab", name=re.compile(r"Reviews?|Overview", re.I)).or_(
+                page.locator('a:has-text("Reviews"), a:has-text("Overview")')
+            ).first
+            await tab.wait_for(state="visible", timeout=15_000)
+            Actor.log.info("  Page ready — continuing")
         except Exception:
-            pass
+            Actor.log.warning("  Page not ready — captcha or slow load. Waiting up to 90s (solve captcha if visible)")
+            await Actor.set_status_message("Waiting for page — solve captcha if visible")
+            try:
+                tab = page.get_by_role("tab", name=re.compile(r"Reviews?|Overview", re.I)).or_(
+                    page.locator('a:has-text("Reviews"), a:has-text("Overview")')
+                ).first
+                await tab.wait_for(state="visible", timeout=90_000)
+                Actor.log.info("  Page ready — captcha resolved or load complete")
+                await Actor.set_status_message("Page ready — continuing")
+            except Exception:
+                Actor.log.warning("  Page still not ready after 90s — continuing anyway")
+        await asyncio.sleep(1.0)
 
         # ── Consent / cookie banner ───────────────────────────────────────
         consent_selectors = [
@@ -927,19 +1021,7 @@ async def scrape_place(
             except Exception:
                 pass
 
-        # ── Click "Traveler tips" tab to trigger CommunityUGC__locationTips ─
-        for tab_text in ["Traveler tips", "Traveller tips", "Tips"]:
-            try:
-                tab = page.get_by_role("tab", name=tab_text).or_(page.locator(f'a:has-text("{tab_text}")'))
-                if await tab.first.is_visible(timeout=2000):
-                    await tab.first.click()
-                    Actor.log.info(f"  Clicked '{tab_text}' tab")
-                    await asyncio.sleep(random.uniform(2.0, 3.0))
-                    break
-            except Exception:
-                pass
-
-        # ── Scroll to trigger lazy-loaded reviews/tips ─────────────────────
+        # ── Scroll to trigger lazy-loaded content ─────────────────────────
         for _ in range(8):
             await page.evaluate("window.scrollBy(0, 500)")
             await asyncio.sleep(random.uniform(1.2, 2.0))
@@ -950,186 +1032,138 @@ async def scrape_place(
 
         landed_url = page.url
         landed_title = await page.title()
-        Actor.log.info(f"  Landed on: {landed_url[:80]}...")
-        Actor.log.info(f"  Page title: {landed_title}")
+        Actor.log.info(f"  Page loaded: {landed_title}")
 
         if "tripadvisor.com" not in landed_url:
             Actor.log.warning(f"  Redirected away from TripAdvisor — skipping")
-            return None, []
+            return None, 0
 
         Actor.log.info(f"  Captured {len(graphql_responses)} GraphQL response(s)")
 
-        place_obj, reviews = await extract_page_data(page, landed_url)
+        place_obj, _ = await extract_page_data(page, landed_url)
+        reviews: list[dict] = []
+        seen_ids: set[str] = set()
+        total_pushed = 0
+        oldest_date = ""
+        start_ts = (start_date.strip()[:10] if start_date and start_date.strip() else "") or ""
 
-        # ── Direct GraphQL fetch for main reviews (paginated: offset 0, 10, 20, …) ─
+        async def _push_batch(batch: list[dict]) -> None:
+            nonlocal total_pushed, oldest_date
+            for item in batch:
+                await Actor.push_data(item)
+            total_pushed += len(batch)
+            if batch:
+                batch_dates = [
+                    (r.get("date") or r.get("publishedDate") or "")[:10]
+                    for r in batch
+                    if (r.get("date") or r.get("publishedDate") or "")
+                ]
+                batch_oldest = min(batch_dates) if batch_dates else ""
+                if batch_oldest and (not oldest_date or batch_oldest < oldest_date):
+                    oldest_date = batch_oldest
+            Actor.log.info(
+                f"  Pushed batch: {len(batch)} reviews | "
+                f"Place {place_idx}/{total_places} | Total: {total_pushed}"
+            )
+            await Actor.set_status_message(
+                f"Place {place_idx}/{total_places}: {total_pushed} reviews"
+            )
+
+        # ── Direct GraphQL fetch for reviews (parallel batches of PARALLEL_REQUESTS) ─
         loc_id = extract_location_id_from_url(landed_url)
         if loc_id:
             reviews_per_page = 10
             reviews_offset = 0
             while True:
-                if max_reviews and len(reviews) >= max_reviews:
+                if max_reviews and total_pushed + len(reviews) >= max_reviews:
                     break
-                reviews_resp = await fetch_reviews_via_graphql(
-                    page, loc_id, offset=reviews_offset, limit=reviews_per_page
-                )
-                if not reviews_resp:
+                # Fetch PARALLEL_REQUESTS offsets in parallel
+                batch_offsets = [
+                    reviews_offset + i * reviews_per_page
+                    for i in range(PARALLEL_REQUESTS)
+                ]
+                if max_reviews:
+                    batch_offsets = [o for o in batch_offsets if o < max_reviews]
+                if not batch_offsets:
                     break
-                main_reviews = parse_reviews_from_graphql(
-                    reviews_resp if isinstance(reviews_resp, list) else [reviews_resp]
-                )
-                if not main_reviews:
-                    # Debug: log response keys so we can fix the parser
-                    _log_graphql_keys(reviews_resp, "reviews")
+                tasks = [
+                    fetch_reviews_via_graphql(page, loc_id, offset=o, limit=reviews_per_page)
+                    for o in batch_offsets
+                ]
+                batch_results = await asyncio.gather(*tasks, return_exceptions=True)
+                got_any = False
+                got_partial = False
+                for i, resp in enumerate(batch_results):
+                    if isinstance(resp, Exception):
+                        Actor.log.warning(f"  GraphQL fetch offset={batch_offsets[i]} failed: {resp}")
+                        continue
+                    if not resp:
+                        continue
+                    extracted = parse_reviews_from_graphql(
+                        resp if isinstance(resp, list) else [resp]
+                    )
+                    if extracted:
+                        got_any = True
+                    for t in extracted:
+                        rid = str(t.get("id") or t.get("review_id") or "")
+                        if rid and rid not in seen_ids:
+                            seen_ids.add(rid)
+                            t["place_url"] = landed_url
+                            place_name = (place_obj.get("name", "") if place_obj else "") or (t.get("placeInfo") or {}).get("name", "")
+                            t["name"] = place_name
+                            if start_ts and ((t.get("date") or t.get("publishedDate") or "")[:10] or "9999") < start_ts:
+                                continue
+                            reviews.append(t)
+                    if len(extracted) < reviews_per_page:
+                        got_partial = True
+                        break
+                if not got_any or got_partial:
                     break
-                graphql_responses.append(reviews_resp)
-                Actor.log.info(
-                    f"  Fetched reviews via GraphQL (offset={reviews_offset}): {len(main_reviews)} items"
-                )
-                reviews_offset += reviews_per_page
-                if len(main_reviews) < reviews_per_page:
-                    break
+                reviews_offset += PARALLEL_REQUESTS * reviews_per_page
                 if max_reviews and reviews_offset >= max_reviews:
                     break
+
+                # Sort and push full batches immediately
+                reviews.sort(key=_date_sort_key, reverse=True)
+                if max_reviews:
+                    reviews = reviews[: max_reviews - total_pushed]
+                while len(reviews) >= PUSH_BATCH_SIZE:
+                    batch = reviews[:PUSH_BATCH_SIZE]
+                    reviews = reviews[PUSH_BATCH_SIZE:]
+                    await _push_batch(batch)
                 await asyncio.sleep(random.uniform(0.5, 1.0))
-
-        # ── Direct GraphQL fetch for tips (paginated: offset 0, 20, 40, …) ─
-        loc_id = extract_location_id_from_url(landed_url)
-        if loc_id:
-            tips_per_page = 20
-            tips_offset = 0
-            while True:
-                tips_resp = await fetch_tips_via_graphql(
-                    page, loc_id, offset=tips_offset, limit=tips_per_page
-                )
-                if not tips_resp:
-                    break
-                tips = parse_tips_from_graphql(
-                    tips_resp if isinstance(tips_resp, list) else [tips_resp]
-                )
-                if not tips:
-                    break
-                graphql_responses.append(tips_resp)
-                Actor.log.info(
-                    f"  Fetched tips via GraphQL (offset={tips_offset}): {len(tips)} items"
-                )
-                tips_offset += tips_per_page
-                if len(tips) < tips_per_page:
-                    break
-                if max_reviews and tips_offset >= max_reviews:
-                    break
-                await asyncio.sleep(random.uniform(0.5, 1.0))
-
-        # ── Parse GraphQL responses (reviews + tips + Q&A) ───────────────────
-        if graphql_responses:
-            seen_ids: set[str] = set()
-            all_keys: set[str] = set()
-            for resp in graphql_responses:
-                data = resp if isinstance(resp, list) else [resp]
-                for item in data if isinstance(data, list) else [data]:
-                    if isinstance(item, dict):
-                        all_keys.update((item.get("data") or {}).keys())
-                # Try main reviews first, then tips, then Q&A
-                extracted = parse_reviews_from_graphql(data)
-                if not extracted:
-                    extracted = parse_tips_from_graphql(data)
-                if not extracted:
-                    extracted = parse_qa_from_graphql(data)
-                for t in extracted:
-                    rid = t.get("review_id") or ("qa_" + str(len(reviews)))
-                    if rid not in seen_ids:
-                        seen_ids.add(rid)
-                        t["place_url"] = landed_url
-                        t.setdefault("place_name", place_obj.get("name", "") if place_obj else "")
-                        reviews.append(t)
-                if extracted:
-                    Actor.log.info(f"  Extracted {len(extracted)} reviews/tips/Q&A from GraphQL")
-            if not reviews and all_keys:
-                Actor.log.info(f"  GraphQL keys (no reviews/tips/Q&A): {sorted(all_keys)[:15]}")
-
-        # Ensure all items have place_url, place_name, and source
-        for r in reviews:
-            r.setdefault("place_url", landed_url)
-            r.setdefault("place_name", place_obj.get("name", "") if place_obj else "")
-            r.setdefault("source", "review")
 
         if not place_obj:
-            place_obj = {"_type": "place", "url": landed_url, "name": "", "review_count": 0}
+            place_obj = {"url": landed_url, "name": "", "review_count": 0}
+        if not place_obj.get("name") and reviews:
+            place_obj["name"] = (reviews[0].get("placeInfo") or {}).get("name", "") or ""
 
-        total_reviews = place_obj.get("review_count") or 0
-        if not total_reviews and reviews:
-            total_reviews = len(reviews)
-
-        Actor.log.info(
-            f"  Place: {place_obj.get('name', '')!r} | "
-            f"Rating: {place_obj.get('rating', '')} | "
-            f"Page 1: {len(reviews)} reviews"
-        )
-        if not reviews and not graphql_responses:
-            Actor.log.warning(
-                "  No reviews or GraphQL data captured. TripAdvisor may be blocking automated access. "
-                "Try enabling Apify Residential Proxy in the input."
-            )
-
-        # ── Phase 2: Pagination ───────────────────────────────────────────
-        pages_to_fetch = max(1, (total_reviews + REVIEWS_PER_PAGE - 1) // REVIEWS_PER_PAGE)
-        if max_reviews and reviews:
-            pages_to_fetch = min(
-                pages_to_fetch,
-                (max_reviews + REVIEWS_PER_PAGE - 1) // REVIEWS_PER_PAGE,
-            )
-
-        for page_num in range(2, pages_to_fetch + 1):
-            if max_reviews and len(reviews) >= max_reviews:
-                Actor.log.info(f"  Reached maxReviewsPerPlace={max_reviews} — stopping.")
-                break
-
-            offset = REVIEWS_PER_PAGE * (page_num - 1)
-            paginated_url = build_pagination_url(place_url, offset)
-
-            await Actor.set_status_message(
-                f"{place_obj.get('name', '')[:30]}: page {page_num}/{pages_to_fetch} …"
-            )
-
-            await asyncio.sleep(random.uniform(0.3, 0.8))
-
-            try:
-                await with_retry(
-                    lambda: page.goto(paginated_url, wait_until="load", timeout=30_000),
-                    label=f"page {page_num}",
-                )
-            except Exception as exc:
-                Actor.log.warning(f"  Page {page_num} failed: {exc} — stopping pagination")
-                break
-
-            await asyncio.sleep(random.uniform(0.5, 1.0))
-
-            _, page_reviews = await extract_page_data(page, landed_url)
-            if not page_reviews:
-                Actor.log.info(f"  Page {page_num}: no reviews — done.")
-                break
-
-            for r in page_reviews:
-                r["place_url"] = landed_url
-                r.setdefault("place_name", place_obj.get("name", ""))
-                reviews.append(r)
-
-            Actor.log.info(
-                f"  Page {page_num}/{pages_to_fetch}: +{len(page_reviews)} reviews "
-                f"(total: {len(reviews)})"
-            )
-
-        # Sort by date (newest first)
+        # Sort and push remaining reviews
         reviews.sort(key=_date_sort_key, reverse=True)
-
         if max_reviews:
-            reviews = reviews[:max_reviews]
+            reviews = reviews[: max_reviews - total_pushed]
+        if reviews:
+            await _push_batch(reviews)
 
-        Actor.log.info(f"  Done: {len(reviews)} reviews scraped")
-        return place_obj, reviews
+        if total_pushed == 0:
+            Actor.log.warning(
+                "  No reviews captured. TripAdvisor may be blocking. "
+                "Try enabling Apify Residential Proxy."
+            )
+
+        if place_obj:
+            place_obj["id"] = place_obj.get("id") or loc_id or ""
+            place_obj["reviewCount"] = total_pushed
+            place_obj["oldestDate"] = oldest_date
+            place_obj["error"] = None
+
+        Actor.log.info(f"  Done: {total_pushed} reviews scraped")
+        return place_obj, total_pushed
 
     except Exception as exc:
         Actor.log.warning(f"  Unexpected error: {exc}")
-        return None, []
+        err_place = {"url": place_url, "name": "", "reviewCount": 0, "oldestDate": "", "error": str(exc)}
+        return err_place, 0
 
     finally:
         await page.close()
@@ -1153,6 +1187,7 @@ async def main() -> None:
 
         raw_urls = actor_input.get("startUrls") or actor_input.get("start_urls") or []
         max_reviews: Optional[int] = actor_input.get("maxReviewsPerPlace")
+        start_date: Optional[str] = actor_input.get("startDate") or ""
         proxy_input = actor_input.get("proxyConfiguration")
 
         INTER_PLACE_DELAY = 2.0
@@ -1164,6 +1199,8 @@ async def main() -> None:
 
         Actor.log.info(f"Places to scrape: {len(raw_urls)}")
         Actor.log.info(f"Max reviews/place: {max_reviews or 'unlimited'}")
+        if start_date:
+            Actor.log.info(f"Start date filter: {start_date}")
         Actor.log.info(f"Inter-place delay: {INTER_PLACE_DELAY}s (+ 0–1s jitter)")
 
         proxy_configuration = None
@@ -1208,22 +1245,19 @@ async def main() -> None:
                         session_id=re.sub(r"[^\w]", "_", loc_id)
                     )
 
-                place_obj, reviews = await scrape_place(
-                    pw, place_url, max_reviews, proxy_url
+                place_obj, pushed = await scrape_place(
+                    pw, place_url, max_reviews, proxy_url,
+                    start_date=start_date or None,
+                    place_idx=idx,
+                    total_places=len(raw_urls),
                 )
 
                 if place_obj:
-                    await Actor.push_data(place_obj)
+                    kv_key = f"place-{extract_location_id_from_url(place_url) or idx}"
+                    await Actor.set_value(kv_key, place_obj)
                     total_places += 1
 
-                for review in reviews:
-                    await Actor.push_data(review)
-                total_reviews += len(reviews)
-
-                Actor.log.info(
-                    f"  Pushed: {len(reviews)} reviews "
-                    f"(totals: {total_places} places, {total_reviews} reviews)"
-                )
+                total_reviews += pushed
 
                 if idx < len(raw_urls):
                     jitter = random.uniform(0.0, 1.0)
