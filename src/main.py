@@ -149,6 +149,20 @@ def _date_sort_key(item: dict) -> tuple:
     return (0, 0)
 
 
+def _log_graphql_keys(resp: Any, label: str) -> None:
+    """Log top-level keys from GraphQL response for debugging parser."""
+    try:
+        data = resp if isinstance(resp, list) else [resp]
+        for i, item in enumerate(data):
+            if isinstance(item, dict):
+                inner = item.get("data") or {}
+                if isinstance(inner, dict) and inner:
+                    keys = sorted(inner.keys())
+                    Actor.log.info(f"  [{label}] response[{i}] data keys: {keys}")
+    except Exception:
+        pass
+
+
 def dig(obj: Any, *keys, default: Any = None) -> Any:
     """Safely traverse a nested dict/list without raising KeyError/IndexError."""
     for key in keys:
@@ -895,6 +909,8 @@ async def scrape_place(
                     reviews_resp if isinstance(reviews_resp, list) else [reviews_resp]
                 )
                 if not main_reviews:
+                    # Debug: log response keys so we can fix the parser
+                    _log_graphql_keys(reviews_resp, "reviews")
                     break
                 graphql_responses.append(reviews_resp)
                 Actor.log.info(
