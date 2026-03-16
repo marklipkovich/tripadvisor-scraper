@@ -1,0 +1,37 @@
+{
+	"$schema": "https://apify.com/schemas/v1/input.ide.json",
+	"title": "TripAdvisor Reviews Scraper Input",
+	"type": "object",
+	"schemaVersion": 1,
+	"properties": {
+		"startUrls": {
+			"title": "Place URLs",
+			"type": "array",
+			"description": "TripAdvisor place URLs to scrape reviews from (hotels, restaurants, attractions)",
+			"editor": "requestListSources",
+			"prefill": [
+				{
+					"url": "https://www.tripadvisor.com/Hotel_Review-g190327-d264936-Reviews-1926_Hotel_Spa-Sliema_Island_of_Malta.html"
+				}
+			]
+		},
+		"maxReviewsPerPlace": {
+			"title": "Max Reviews per Place",
+			"type": "integer",
+			"description": "Maximum number of reviews to scrape per place (0 = unlimited)",
+			"default": 0,
+			"minimum": 0,
+			"unit": "reviews"
+		},
+		"proxyConfiguration": {
+			"title": "Proxy Configuration",
+			"type": "object",
+			"description": "Proxy settings for anti-bot protection. Recommended for high-volume runs.",
+			"editor": "proxy",
+			"default": {
+				"useApifyProxy": false
+			}
+		}
+	},
+	"required": ["startUrls"]
+}

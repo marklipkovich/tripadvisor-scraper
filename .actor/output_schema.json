@@ -1,0 +1,13 @@
+{
+	"$schema": "https://apify.com/schemas/v1/output.ide.json",
+	"actorOutputSchemaVersion": 1,
+	"title": "TripAdvisor Reviews Scraper Output",
+	"properties": {
+		"results": {
+			"type": "string",
+			"title": "Results",
+			"description": "Place profiles and reviews in the default dataset",
+			"template": "{{links.apiDefaultDatasetUrl}}/items"
+		}
+	}
+}

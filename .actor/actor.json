@@ -1,0 +1,19 @@
+{
+	"$schema": "https://apify.com/schemas/v1/actor.ide.json",
+	"actorSpecification": 1,
+	"name": "tripadvisor",
+	"title": "TripAdvisor Reviews Scraper",
+	"description": "Scrapes reviews from TripAdvisor places (hotels, restaurants, attractions). Uses JSON-LD and DOM extraction with anti-blocking protection. Supports pagination beyond 200 reviews.",
+	"version": "1.0",
+	"buildTag": "latest",
+	"meta": {
+		"templateId": "python-playwright",
+		"generatedBy": "Cursor with Claude"
+	},
+	"input": "./input_schema.json",
+	"output": "./output_schema.json",
+	"storages": {
+		"dataset": "./dataset_schema.json"
+	},
+	"dockerfile": "../Dockerfile"
+}

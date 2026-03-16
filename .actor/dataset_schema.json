@@ -1,0 +1,188 @@
+{
+	"$schema": "https://apify.com/schemas/v1/dataset.ide.json",
+	"actorSpecification": 1,
+	"fields": {},
+	"views": {
+		"overview": {
+			"title": "Overview",
+			"transformation": {
+				"fields": [
+					"_type",
+					"name",
+					"url",
+					"rating",
+					"review_count",
+					"title",
+					"text",
+					"date",
+					"place_name",
+					"place_url"
+				]
+			},
+			"display": {
+				"component": "table",
+				"properties": {
+					"_type": {
+						"label": "Type",
+						"format": "text"
+					},
+					"name": {
+						"label": "Place Name",
+						"format": "text"
+					},
+					"url": {
+						"label": "URL",
+						"format": "link"
+					},
+					"rating": {
+						"label": "Rating",
+						"format": "number"
+					},
+					"review_count": {
+						"label": "Review Count",
+						"format": "number"
+					},
+					"title": {
+						"label": "Review Title",
+						"format": "text"
+					},
+					"text": {
+						"label": "Review Text",
+						"format": "text"
+					},
+					"date": {
+						"label": "Date",
+						"format": "text"
+					},
+					"place_name": {
+						"label": "Place Name",
+						"format": "text"
+					},
+					"place_url": {
+						"label": "Place URL",
+						"format": "link"
+					}
+				}
+			}
+		},
+		"places": {
+			"title": "Places",
+			"transformation": {
+				"fields": [
+					"_type",
+					"name",
+					"url",
+					"rating",
+					"review_count",
+					"address",
+					"city",
+					"country",
+					"price_range"
+				]
+			},
+			"display": {
+				"component": "table",
+				"properties": {
+					"_type": {
+						"label": "Type",
+						"format": "text"
+					},
+					"name": {
+						"label": "Name",
+						"format": "text"
+					},
+					"url": {
+						"label": "URL",
+						"format": "link"
+					},
+					"rating": {
+						"label": "Rating",
+						"format": "number"
+					},
+					"review_count": {
+						"label": "Reviews",
+						"format": "number"
+					},
+					"address": {
+						"label": "Address",
+						"format": "text"
+					},
+					"city": {
+						"label": "City",
+						"format": "text"
+					},
+					"country": {
+						"label": "Country",
+						"format": "text"
+					},
+					"price_range": {
+						"label": "Price Range",
+						"format": "text"
+					}
+				}
+			}
+		},
+		"reviews": {
+			"title": "Reviews",
+			"transformation": {
+				"fields": [
+					"_type",
+					"place_name",
+					"title",
+					"text",
+					"rating",
+					"date",
+					"reviewer_name",
+					"helpful_votes",
+					"management_response",
+					"place_url"
+				]
+			},
+			"display": {
+				"component": "table",
+				"properties": {
+					"_type": {
+						"label": "Type",
+						"format": "text"
+					},
+					"place_name": {
+						"label": "Place",
+						"format": "text"
+					},
+					"title": {
+						"label": "Title",
+						"format": "text"
+					},
+					"text": {
+						"label": "Review",
+						"format": "text"
+					},
+					"rating": {
+						"label": "Rating",
+						"format": "number"
+					},
+					"date": {
+						"label": "Date",
+						"format": "text"
+					},
+					"reviewer_name": {
+						"label": "Reviewer",
+						"format": "text"
+					},
+					"helpful_votes": {
+						"label": "Helpful",
+						"format": "number"
+					},
+					"management_response": {
+						"label": "Response",
+						"format": "text"
+					},
+					"place_url": {
+						"label": "Place URL",
+						"format": "link"
+					}
+				}
+			}
+		}
+	}
+}
