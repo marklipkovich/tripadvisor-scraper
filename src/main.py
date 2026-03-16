@@ -927,6 +927,7 @@ async def scrape_place(
     total_places: int = 1,
     captcha_wait_seconds: int = 0,
     debug_captcha: bool = False,
+    try_auto_slide: bool = False,
 ) -> tuple[Optional[dict], int]:
     """
     Scrape a single TripAdvisor place (hotel, restaurant, attraction).
@@ -966,6 +967,20 @@ async def scrape_place(
 
     page.on("response", on_response)
 
+    # ── Captcha listener: triggers when captcha iframe appears (any place) ─
+    captcha_detected = asyncio.Event()
+    captcha_frame_ref: list = []  # [frame] for auto-slide
+
+    def _on_frame(f):
+        url = (f.url or "").lower()
+        if "captcha-delivery.com" in url:
+            captcha_frame_ref.clear()
+            captcha_frame_ref.append(f)
+            captcha_detected.set()
+
+    page.on("frameattached", _on_frame)
+    page.on("framenavigated", _on_frame)
+
     try:
         # ── Phase 1: Navigate and extract first page ───────────────────────
         Actor.log.info("  Navigating …")
@@ -980,15 +995,8 @@ async def scrape_place(
                 label=f"goto fallback {place_url[:50]}",
             )
 
-        # Captcha appears only on first place — skip check for place 2+
         if place_idx == 1:
-            await asyncio.sleep(random.uniform(7.0, 10.0))  # Captcha may load with delay
-        else:
-            await asyncio.sleep(random.uniform(2.0, 3.0))  # Short wait for page stability
-
-        if place_idx == 1:
-            # ── Check for TripAdvisor captcha ("Verification Required" / "Slide right") ─
-            Actor.log.info("  Checking for captcha …")
+            await asyncio.sleep(random.uniform(1.5, 2.5))
 
         async def _debug_captcha_elements() -> None:
             try:
@@ -996,107 +1004,54 @@ async def scrape_place(
                     () => Array.from(document.querySelectorAll('iframe'))
                         .map(f => (f.src || '').slice(0, 100))
                 """)
-                captcha_iframes = [s for s in iframes if any(k in s.lower() for k in ['captcha', 'recaptcha', 'turnstile', 'challenge', 'verify'])]
+                captcha_iframes = [s for s in iframes if 'captcha-delivery.com' in s.lower()]
+                other_iframes = [s for s in iframes if s and 'captcha-delivery.com' not in s.lower()]
                 if captcha_iframes:
                     Actor.log.info(f"  [DEBUG] Captcha iframes: {captcha_iframes}")
-                else:
-                    Actor.log.info(f"  [DEBUG] Iframes: {iframes[:5]}{'…' if len(iframes) > 5 else ''}")
+                if other_iframes:
+                    Actor.log.info(f"  [DEBUG] Other iframes: {other_iframes[:3]}{'…' if len(other_iframes) > 3 else ''}")
+                if not captcha_iframes and not other_iframes:
+                    Actor.log.info("  [DEBUG] No iframes found")
             except Exception as e:
                 Actor.log.warning(f"  [DEBUG] Captcha debug failed: {e}")
 
-        if place_idx == 1:
-            if debug_captcha:
-                await _debug_captcha_elements()
-            # TripAdvisor captcha: "Verification Required" + "Slide right to secure your access"
-            captcha_texts = [
-                "Verification Required",
-                "Slide right to secure your access",
-                "Slide right",
-                "Verification required",
-            ]
-            captcha_selectors = [
-                "#px-captcha",
-                "[id*='px-captcha']",
-                "[class*='px-captcha']",
-                "iframe[src*='captcha-delivery.com']",  # PerimeterX / TripAdvisor
-                "iframe[src*='recaptcha']",
-                "iframe[src*='challenges.cloudflare']",
-                "iframe[title*='reCAPTCHA']",
-            ]
-            captcha_found = False
-            for attempt in range(3):
-                for text in captcha_texts:
-                    try:
-                        loc = page.get_by_text(text, exact=False).first
-                        if await loc.is_visible(timeout=3000):
-                            Actor.log.warning(f"  Captcha detected (text: '{text}') — waiting up to 90s for manual solve")
-                            await Actor.set_status_message("Captcha detected — please solve manually")
-                            await loc.wait_for(state="hidden", timeout=90_000)
-                            Actor.log.info("  Captcha resolved — continuing")
-                            await Actor.set_status_message("Captcha resolved — continuing")
-                            captcha_found = True
-                            break
-                    except Exception:
-                        pass
-                if captcha_found:
-                    break
-                # Also check inside iframes (captcha may be in cross-origin iframe)
-                for frame in page.frames:
-                    if frame != page.main_frame:
-                        try:
-                            loc = frame.get_by_text("Verification Required", exact=False).first
-                            if await loc.is_visible(timeout=2000):
-                                Actor.log.warning("  Captcha detected (in iframe: 'Verification Required') — waiting up to 90s for manual solve")
-                                await Actor.set_status_message("Captcha detected — please solve manually")
-                                resolved = False
-                                try:
-                                    await loc.wait_for(state="detached", timeout=90_000)
-                                    resolved = True
-                                except Exception as e:
-                                    err = str(e).lower()
-                                    if "detached" in err or "target" in err or "frame" in err or "closed" in err:
-                                        resolved = True
-                                    else:
-                                        try:
-                                            await loc.wait_for(state="hidden", timeout=5_000)
-                                            resolved = True
-                                        except Exception:
-                                            pass
-                                if resolved:
-                                    Actor.log.info("  Captcha resolved — continuing")
-                                    await Actor.set_status_message("Captcha resolved — continuing")
-                                    captcha_found = True
-                                    break
-                        except Exception:
-                            pass
-                if captcha_found:
-                    break
-                for sel in captcha_selectors:
-                    try:
-                        loc = page.locator(sel).first
-                        if await loc.is_visible(timeout=3000):
-                            Actor.log.warning(f"  Captcha detected ({sel}) — waiting up to 90s for manual solve")
-                            await Actor.set_status_message("Captcha detected — please solve manually")
-                            try:
-                                await loc.wait_for(state="detached", timeout=90_000)
-                            except Exception as e:
-                                if "detached" not in str(e).lower() and "frame" not in str(e).lower():
-                                    await loc.wait_for(state="hidden", timeout=5_000)
-                            Actor.log.info("  Captcha resolved — continuing")
-                            await Actor.set_status_message("Captcha resolved — continuing")
-                            captcha_found = True
-                            break
-                    except Exception:
-                        pass
-                if captcha_found:
-                    break
-                if attempt < 2:
-                    await asyncio.sleep(2.0)
-            if not captcha_found:
-                Actor.log.info("  No captcha detected — continuing")
+        # Wait for EITHER captcha OR page ready (whichever first) — no fixed timeout
+        tab_locator = page.get_by_role("tab", name=re.compile(r"Reviews?|Overview", re.I)).or_(
+            page.locator('a:has-text("Reviews"), a:has-text("Overview")')
+        ).first
+        captcha_seen = False
+        captcha_task = asyncio.create_task(captcha_detected.wait())
+        page_task = asyncio.create_task(tab_locator.wait_for(state="visible", timeout=30_000))
+        done, pending = await asyncio.wait(
+            [captcha_task, page_task],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for t in pending:
+            t.cancel()
+            try:
+                await t
+            except asyncio.CancelledError:
+                pass
+        if captcha_detected.is_set():
+            captcha_seen = True
+            Actor.log.warning("  Captcha detected (listener) — handling …")
+        else:
+            Actor.log.info("  Page ready — continuing")
 
-        # ── Optional: wait for user to solve captcha (first place only) ─
-        if place_idx == 1 and captcha_wait_seconds > 0:
+        # Check for existing captcha (iframe may have loaded before listener)
+        if not captcha_seen:
+            for frame in page.frames:
+                if frame != page.main_frame and (frame.url or "").lower().find("captcha-delivery.com") >= 0:
+                    captcha_seen = True
+                    captcha_frame_ref.clear()
+                    captcha_frame_ref.append(frame)
+                    break
+
+        if not captcha_seen and debug_captcha:
+            await _debug_captcha_elements()
+
+        # Fallback: captcha wait (first place only, when listener missed)
+        if place_idx == 1 and captcha_wait_seconds > 0 and not captcha_seen:
             Actor.log.warning(f"  Waiting {captcha_wait_seconds}s for captcha — solve it now if visible")
             await Actor.set_status_message(f"Solve captcha if visible — waiting {captcha_wait_seconds}s")
             elapsed = 0
@@ -1104,21 +1059,53 @@ async def scrape_place(
                 chunk = min(5, captcha_wait_seconds - elapsed)
                 await asyncio.sleep(chunk)
                 elapsed += chunk
-                if debug_captcha and elapsed == 5:
-                    Actor.log.info("  [DEBUG] Re-checking iframes (after 5s):")
-                    await _debug_captcha_elements()
+                if captcha_detected.is_set():
+                    captcha_seen = True
+                    Actor.log.warning("  Captcha detected during wait — handling …")
+                    break
                 if elapsed < captcha_wait_seconds:
                     Actor.log.info(f"  … {captcha_wait_seconds - elapsed}s remaining")
-            Actor.log.info("  Captcha wait complete — continuing")
+            if not captcha_seen:
+                Actor.log.info("  Captcha wait complete — continuing")
             await Actor.set_status_message("Continuing …")
-            # Re-check for captcha (may have loaded during wait)
+
+        # Solve captcha (any place)
+        if captcha_seen:
+            await Actor.set_status_message("Captcha detected — please solve manually")
+            if try_auto_slide:
+                if captcha_frame_ref:
+                    try:
+                        frame = captcha_frame_ref[0]
+                        Actor.log.info("  Trying auto-slide (experimental — PerimeterX may block) …")
+                        for sel in ['[class*="slide"]', '[class*="slider"]', '[class*="handle"]', '[role="slider"]', 'button']:
+                            try:
+                                slider = frame.locator(sel).first
+                                if await slider.is_visible(timeout=300):
+                                    box = await slider.bounding_box()
+                                    if box and box.get("width", 0) > 0:
+                                        cx, cy = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+                                        await page.mouse.move(cx, cy)
+                                        await asyncio.sleep(random.uniform(0.15, 0.4))
+                                        await page.mouse.down()
+                                        for i in range(1, 13):
+                                            await page.mouse.move(cx + i * 25, cy + random.uniform(-2, 2))
+                                            await asyncio.sleep(random.uniform(0.03, 0.08))
+                                        await page.mouse.up()
+                                        Actor.log.info("  Auto-slide attempted — waiting 3s")
+                                        await asyncio.sleep(3.0)
+                                        break
+                            except Exception:
+                                continue
+                    except Exception as e:
+                        Actor.log.info(f"  Auto-slide failed: {e}")
+                else:
+                    Actor.log.info("  Auto-slide skipped (no captcha frame)")
             for frame in page.frames:
                 if frame != page.main_frame:
                     try:
                         loc = frame.get_by_text("Verification Required", exact=False).first
-                        if await loc.is_visible(timeout=1500):
-                            Actor.log.warning("  Captcha detected (re-check) — waiting up to 90s for manual solve")
-                            await Actor.set_status_message("Captcha detected — please solve manually")
+                        if await loc.is_visible(timeout=2000):
+                            Actor.log.warning("  Waiting up to 90s for manual solve …")
                             try:
                                 await loc.wait_for(state="detached", timeout=90_000)
                             except Exception as e:
@@ -1132,27 +1119,28 @@ async def scrape_place(
                             break
                     except Exception:
                         pass
-
-        # ── Wait for page to be ready ───────────────────────────────────────
-        Actor.log.info("  Waiting for page to be ready …")
-        try:
-            tab = page.get_by_role("tab", name=re.compile(r"Reviews?|Overview", re.I)).or_(
-                page.locator('a:has-text("Reviews"), a:has-text("Overview")')
-            ).first
-            await tab.wait_for(state="visible", timeout=15_000)
-            Actor.log.info("  Page ready — continuing")
-        except Exception:
-            Actor.log.warning("  Page not ready — waiting up to 90s (solve captcha if visible)")
-            await Actor.set_status_message("Waiting for page — solve captcha if visible")
             try:
-                tab = page.get_by_role("tab", name=re.compile(r"Reviews?|Overview", re.I)).or_(
-                    page.locator('a:has-text("Reviews"), a:has-text("Overview")')
-                ).first
-                await tab.wait_for(state="visible", timeout=90_000)
-                Actor.log.info("  Page ready — continuing")
-                await Actor.set_status_message("Page ready — continuing")
+                loc = page.locator("iframe[src*='captcha-delivery.com']").first
+                if await loc.is_visible(timeout=2000):
+                    await loc.wait_for(state="detached", timeout=90_000)
             except Exception:
-                Actor.log.warning("  Page still not ready after 90s — continuing anyway")
+                pass
+
+        # ── Page ready (already waited above, or after captcha solve) ────────
+        if not captcha_seen:
+            pass  # Already waited for tab in "wait for either"
+        else:
+            Actor.log.info("  Waiting for page to be ready …")
+            try:
+                await tab_locator.wait_for(state="visible", timeout=15_000)
+                Actor.log.info("  Page ready — continuing")
+            except Exception:
+                Actor.log.warning("  Page not ready — waiting up to 90s")
+                try:
+                    await tab_locator.wait_for(state="visible", timeout=90_000)
+                    Actor.log.info("  Page ready — continuing")
+                except Exception:
+                    Actor.log.warning("  Page still not ready after 90s — continuing anyway")
         await asyncio.sleep(1.0)
 
         # ── Consent / cookie banner ───────────────────────────────────────
@@ -1374,6 +1362,7 @@ async def main() -> None:
         start_date: Optional[str] = actor_input.get("startDate") or ""
         captcha_wait: int = int(actor_input.get("captchaWaitSeconds") or 0)
         debug_captcha: bool = bool(actor_input.get("debugCaptcha"))
+        try_auto_slide: bool = bool(actor_input.get("tryAutoSlide"))
         proxy_input = actor_input.get("proxyConfiguration")
 
         INTER_PLACE_DELAY = 2.0
@@ -1390,7 +1379,9 @@ async def main() -> None:
         if captcha_wait:
             Actor.log.info(f"Captcha wait: {captcha_wait}s (solve captcha when prompted)")
         if debug_captcha:
-            Actor.log.info("Captcha debug: ON — will log captcha-related elements")
+            Actor.log.info("Captcha debug: ON — will log captcha-related iframes")
+        if try_auto_slide:
+            Actor.log.info("Try auto-slide: ON — will attempt to auto-solve slide captcha")
         Actor.log.info(f"Inter-place delay: {INTER_PLACE_DELAY}s (+ 0–1s jitter)")
 
         proxy_configuration = None
@@ -1450,6 +1441,7 @@ async def main() -> None:
                         total_places=len(raw_urls),
                         captcha_wait_seconds=captcha_wait,
                         debug_captcha=debug_captcha,
+                        try_auto_slide=try_auto_slide,
                     )
 
                     if place_obj:

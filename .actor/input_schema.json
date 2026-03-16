@@ -47,10 +47,16 @@
 			"maximum": 120,
 			"unit": "seconds"
 		},
+		"tryAutoSlide": {
+			"title": "Try auto-slide captcha",
+			"type": "boolean",
+			"description": "When true, attempts to automatically solve the slide captcha by simulating a drag. Experimental — may not work with PerimeterX. Falls back to manual solve if it fails.",
+			"default": false
+		},
 		"debugCaptcha": {
 			"title": "Debug captcha",
 			"type": "boolean",
-			"description": "When true, logs all page elements that might be captcha-related (id/class containing captcha, px, challenge, verify). Run with captcha visible to find the right selector.",
+			"description": "When true, logs captcha-related iframes (captcha-delivery.com only). Run with captcha visible to debug.",
 			"default": false
 		}
 	},
