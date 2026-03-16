@@ -33,7 +33,6 @@ from urllib.parse import urlparse
 from apify import Actor
 from crawlee.events import Event
 from patchright.async_api import async_playwright, Page
-from playwright_stealth import Stealth
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -402,7 +401,7 @@ async def make_browser(playwright):
     return browser, fp
 
 
-async def make_context(browser, fp: dict, proxy_url: Optional[str] = None, stealth=None):
+async def make_context(browser, fp: dict, proxy_url: Optional[str] = None):
     """Create a new context from an existing browser (one per place). Uses same fingerprint for all places to avoid captcha on second+ place."""
     Actor.log.info(
         f"  Fingerprint: Chrome/{fp['chrome_version']} | "
@@ -428,15 +427,12 @@ async def make_context(browser, fp: dict, proxy_url: Optional[str] = None, steal
 
     context = await browser.new_context(**ctx_kwargs)
 
-    if stealth:
-        await stealth.apply_stealth_async(context)
-    else:
-        await context.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-            Object.defineProperty(navigator, 'plugins',   { get: () => [1,2,3,4,5] });
-            Object.defineProperty(navigator, 'languages', { get: () => ['en-US','en'] });
-            window.chrome = { runtime: {} };
-        """)
+    await context.add_init_script("""
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        Object.defineProperty(navigator, 'plugins',   { get: () => [1,2,3,4,5] });
+        Object.defineProperty(navigator, 'languages', { get: () => ['en-US','en'] });
+        window.chrome = { runtime: {} };
+    """)
 
     return context
 
@@ -932,7 +928,6 @@ async def scrape_place(
     captcha_wait_seconds: int = 0,
     debug_captcha: bool = False,
     try_auto_slide: bool = False,
-    stealth=None,
 ) -> tuple[Optional[dict], int]:
     """
     Scrape a single TripAdvisor place (hotel, restaurant, attraction).
@@ -949,7 +944,7 @@ async def scrape_place(
     if shared_context is not None:
         context = shared_context
     else:
-        context = await make_context(browser, fingerprint, proxy_url, stealth)
+        context = await make_context(browser, fingerprint, proxy_url)
     page = await context.new_page()
 
     # Collect GraphQL responses (CommunityUGC__locationTips, etc.)
@@ -1408,7 +1403,6 @@ async def main() -> None:
         total_places = 0
         total_reviews = 0
 
-        stealth = Stealth()
         async with async_playwright() as pw:
             browser, fingerprint = await make_browser(pw)
             shared_ctx = None
@@ -1437,7 +1431,7 @@ async def main() -> None:
 
                     # Reuse one context when no proxy — keeps one window, avoids new window per place
                     if shared_ctx is None and not proxy_url:
-                        shared_ctx = await make_context(browser, fingerprint, None, stealth)
+                        shared_ctx = await make_context(browser, fingerprint, None)
 
                     place_obj, pushed = await scrape_place(
                         browser, fingerprint, place_url, max_reviews, proxy_url,
@@ -1448,7 +1442,6 @@ async def main() -> None:
                         captcha_wait_seconds=captcha_wait,
                         debug_captcha=debug_captcha,
                         try_auto_slide=try_auto_slide,
-                        stealth=stealth,
                     )
 
                     if place_obj:
