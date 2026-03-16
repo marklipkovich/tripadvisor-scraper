@@ -965,8 +965,40 @@ async def scrape_place(
 
         await asyncio.sleep(random.uniform(3.0, 5.0))
 
-        # ── Wait for page to be ready (handles captcha without detecting it) ──
-        # If captcha blocks the page, main content won't appear. We wait for it.
+        # ── Check for PerimeterX / captcha (TripAdvisor uses PerimeterX) ─────
+        # PerimeterX renders into #px-captcha; when solved, element is hidden/removed
+        Actor.log.info("  Checking for captcha …")
+        captcha_selectors = [
+            "#px-captcha",  # PerimeterX (TripAdvisor uses this)
+            "[id*='px-captcha']",
+            "[class*='px-captcha']",
+            "iframe[src*='recaptcha']",
+            "iframe[src*='challenges.cloudflare']",
+            "iframe[title*='reCAPTCHA']",
+        ]
+        captcha_found = False
+        for attempt in range(3):  # Captcha may load with delay
+            for sel in captcha_selectors:
+                try:
+                    loc = page.locator(sel).first
+                    if await loc.is_visible(timeout=4000):
+                        Actor.log.warning(f"  Captcha detected ({sel}) — waiting up to 90s for manual solve")
+                        await Actor.set_status_message("Captcha detected — please solve manually")
+                        await loc.wait_for(state="hidden", timeout=90_000)
+                        Actor.log.info("  Captcha resolved — continuing")
+                        await Actor.set_status_message("Captcha resolved — continuing")
+                        captcha_found = True
+                        break
+                except Exception:
+                    pass
+            if captcha_found:
+                break
+            if attempt < 2:
+                await asyncio.sleep(2.0)
+        if not captcha_found:
+            Actor.log.info("  No captcha detected — continuing")
+
+        # ── Wait for page to be ready ───────────────────────────────────────
         Actor.log.info("  Waiting for page to be ready …")
         try:
             tab = page.get_by_role("tab", name=re.compile(r"Reviews?|Overview", re.I)).or_(
@@ -975,14 +1007,14 @@ async def scrape_place(
             await tab.wait_for(state="visible", timeout=15_000)
             Actor.log.info("  Page ready — continuing")
         except Exception:
-            Actor.log.warning("  Page not ready — captcha or slow load. Waiting up to 90s (solve captcha if visible)")
+            Actor.log.warning("  Page not ready — waiting up to 90s (solve captcha if visible)")
             await Actor.set_status_message("Waiting for page — solve captcha if visible")
             try:
                 tab = page.get_by_role("tab", name=re.compile(r"Reviews?|Overview", re.I)).or_(
                     page.locator('a:has-text("Reviews"), a:has-text("Overview")')
                 ).first
                 await tab.wait_for(state="visible", timeout=90_000)
-                Actor.log.info("  Page ready — captcha resolved or load complete")
+                Actor.log.info("  Page ready — continuing")
                 await Actor.set_status_message("Page ready — continuing")
             except Exception:
                 Actor.log.warning("  Page still not ready after 90s — continuing anyway")
