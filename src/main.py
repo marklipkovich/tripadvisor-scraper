@@ -109,6 +109,46 @@ async def with_retry(
 #  DATA HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
 
+_MONTH_NAMES = {
+    "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
+    "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+    "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9,
+    "oct": 10, "october": 10, "nov": 11, "november": 11, "dec": 12, "december": 12,
+}
+
+
+def _date_sort_key(item: dict) -> tuple:
+    """Return (year, month) for sorting; newest first. Empty/unparseable -> (0, 0)."""
+    raw = (item.get("date") or "").strip()
+    if not raw:
+        return (0, 0)
+    # ISO: "2026-01-24T15:06:21.384Z" or "2025-12-21"
+    m = re.match(r"(\d{4})-(\d{1,2})", raw)
+    if m:
+        return (int(m.group(1)), int(m.group(2)))
+    # "12/2025" or "1/2025" (month/year)
+    m = re.match(r"(\d{1,2})/(\d{4})", raw)
+    if m:
+        return (int(m.group(2)), int(m.group(1)))
+    # "March 2026", "Mar 2026", "24 March 2026", "March 24, 2026"
+    m = re.search(
+        r"(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+        r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|"
+        r"nov(?:ember)?|dec(?:ember)?)\s*,?\s*(\d{4})",
+        raw,
+        re.I,
+    )
+    if m:
+        month = _MONTH_NAMES.get(m.group(1).lower(), 0)
+        if month:
+            return (int(m.group(2)), month)
+    # "2026" only
+    m = re.search(r"\b(20\d{2})\b", raw)
+    if m:
+        return (int(m.group(1)), 12)  # assume Dec if only year
+    return (0, 0)
+
+
 def dig(obj: Any, *keys, default: Any = None) -> Any:
     """Safely traverse a nested dict/list without raising KeyError/IndexError."""
     for key in keys:
@@ -201,6 +241,7 @@ def parse_review_from_dom(review_el: dict) -> dict:
     """Parse a review from DOM-extracted structure."""
     return {
         "_type": "review",
+        "source": "review",
         "review_id": review_el.get("review_id") or "",
         "title": review_el.get("title") or "",
         "text": review_el.get("text") or "",
@@ -247,6 +288,7 @@ def parse_qa_from_graphql(data: list) -> list[dict]:
                 )
                 results.append({
                     "_type": "review",
+                    "source": "qa",
                     "review_id": str(q.get("id") or len(results)),
                     "title": content[:200],
                     "text": ans_text or content,
@@ -297,6 +339,7 @@ def parse_tips_from_graphql(data: list) -> list[dict]:
                         date_str = f"{m}/{y}"
                 reviews.append({
                     "_type": "review",
+                    "source": "tip",
                     "review_id": str(t.get("reviewId") or t.get("id") or ""),
                     "title": "",
                     "text": (t.get("body") or "").strip(),
@@ -495,6 +538,7 @@ async def extract_page_data(page: Page, url: str) -> tuple[Optional[dict], list[
 # ══════════════════════════════════════════════════════════════════════════════
 
 TIPS_QUERY_ID = "13fbbde7cccdbabc"
+REVIEWS_QUERY_ID = "a74001171c4cc850"  # From cURL_reviews.txt — main hotel reviews
 
 
 async def _get_user_id_from_page(page: Page) -> Optional[str]:
@@ -558,6 +602,123 @@ async def fetch_tips_via_graphql(
     except Exception as e:
         Actor.log.warning(f"  GraphQL tips fetch failed: {e}")
         return None
+
+
+async def fetch_reviews_via_graphql(
+    page: Page, location_id: str, offset: int = 0, limit: int = 10
+) -> Optional[list]:
+    """
+    Fetch main hotel reviews via GraphQL (from cURL_reviews.txt).
+    Query a74001171c4cc850: locationId, offset (0, 10, 20...), limit.
+    """
+    variables: dict = {
+        "locationId": int(location_id),
+        "offset": offset,
+        "limit": limit,
+    }
+    payload = [
+        {"variables": variables, "extensions": {"preRegisteredQueryId": REVIEWS_QUERY_ID}}
+    ]
+    url = "https://www.tripadvisor.com/data/graphql/ids"
+    try:
+        result = await page.evaluate(
+            """
+            async (args) => {
+                const resp = await fetch(args.url, {
+                    method: 'POST',
+                    credentials: 'include',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Accept': '*/*',
+                        'Origin': 'https://www.tripadvisor.com',
+                        'Referer': window.location.href,
+                    },
+                    body: JSON.stringify(args.payload),
+                });
+                if (!resp.ok) return null;
+                return await resp.json();
+            }
+            """,
+            {"url": url, "payload": payload},
+        )
+        return result
+    except Exception as e:
+        Actor.log.warning(f"  GraphQL reviews fetch failed: {e}")
+        return None
+
+
+def parse_reviews_from_graphql(data: list) -> list[dict]:
+    """
+    Extract main hotel reviews from GraphQL response.
+    Tries common keys: LocationReviews__getReviews, reviews, reviewList, etc.
+    """
+    results: list[dict] = []
+    if not isinstance(data, list):
+        return results
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        inner = item.get("data") or {}
+        if not isinstance(inner, dict):
+            continue
+        # Try known keys (order matters)
+        reviews_data = (
+            inner.get("LocationReviews__getReviews")
+            or inner.get("LocationReviews")
+            or inner.get("reviews")
+            or inner.get("reviewList")
+        )
+        if reviews_data is None:
+            continue
+        # Handle nested structure: { reviews: [...] } or direct array
+        if isinstance(reviews_data, dict):
+            reviews_list = reviews_data.get("reviews") or reviews_data.get("reviewList") or []
+        else:
+            reviews_list = reviews_data if isinstance(reviews_data, list) else []
+        for r in reviews_list:
+            if not isinstance(r, dict):
+                continue
+            text = (
+                r.get("text")
+                or r.get("body")
+                or r.get("review")
+                or dig(r, "snippets", 0, "text")
+                or ""
+            )
+            if not text and not r.get("title"):
+                continue
+            user = r.get("user") or r.get("userProfile") or r.get("author") or {}
+            name = (
+                user.get("displayName")
+                or user.get("name")
+                or user.get("username")
+                or ""
+            ) if isinstance(user, dict) else ""
+            rating = r.get("rating")
+            if rating is None and isinstance(r.get("tripInfo"), dict):
+                rating = r.get("tripInfo", {}).get("rating")
+            date_val = (
+                r.get("publishedDate")
+                or r.get("createdAt")
+                or r.get("date")
+                or r.get("submittedDateTime")
+                or ""
+            )
+            rid = str(r.get("id") or r.get("reviewId") or r.get("objectId") or len(results))
+            results.append({
+                "_type": "review",
+                "source": "review",
+                "review_id": rid,
+                "title": (r.get("title") or "").strip(),
+                "text": (text or "").strip() if isinstance(text, str) else str(text).strip(),
+                "rating": float(rating) if rating is not None else None,
+                "date": str(date_val)[:50] if date_val else "",
+                "trip_type": (r.get("tripType") or (r.get("tripInfo") or {}).get("tripType") or ""),
+                "reviewer_name": name,
+                "helpful_votes": int(r.get("helpfulVotes") or r.get("helpful_votes") or 0),
+                "management_response": (r.get("managementResponse") or r.get("management_response") or "").strip()[:2000] or "",
+            })
+    return results
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -671,6 +832,18 @@ async def scrape_place(
             except Exception:
                 pass
 
+        # ── Click "Reviews" tab first (triggers main reviews load, per cURL_reviews.txt) ─
+        for tab_text in ["Reviews", "Review"]:
+            try:
+                tab = page.get_by_role("tab", name=tab_text).or_(page.locator(f'a:has-text("{tab_text}")'))
+                if await tab.first.is_visible(timeout=2000):
+                    await tab.first.click()
+                    Actor.log.info(f"  Clicked '{tab_text}' tab")
+                    await asyncio.sleep(random.uniform(2.0, 3.0))
+                    break
+            except Exception:
+                pass
+
         # ── Click "Traveler tips" tab to trigger CommunityUGC__locationTips ─
         for tab_text in ["Traveler tips", "Traveller tips", "Tips"]:
             try:
@@ -705,6 +878,35 @@ async def scrape_place(
 
         place_obj, reviews = await extract_page_data(page, landed_url)
 
+        # ── Direct GraphQL fetch for main reviews (paginated: offset 0, 10, 20, …) ─
+        loc_id = extract_location_id_from_url(landed_url)
+        if loc_id:
+            reviews_per_page = 10
+            reviews_offset = 0
+            while True:
+                if max_reviews and len(reviews) >= max_reviews:
+                    break
+                reviews_resp = await fetch_reviews_via_graphql(
+                    page, loc_id, offset=reviews_offset, limit=reviews_per_page
+                )
+                if not reviews_resp:
+                    break
+                main_reviews = parse_reviews_from_graphql(
+                    reviews_resp if isinstance(reviews_resp, list) else [reviews_resp]
+                )
+                if not main_reviews:
+                    break
+                graphql_responses.append(reviews_resp)
+                Actor.log.info(
+                    f"  Fetched reviews via GraphQL (offset={reviews_offset}): {len(main_reviews)} items"
+                )
+                reviews_offset += reviews_per_page
+                if len(main_reviews) < reviews_per_page:
+                    break
+                if max_reviews and reviews_offset >= max_reviews:
+                    break
+                await asyncio.sleep(random.uniform(0.5, 1.0))
+
         # ── Direct GraphQL fetch for tips (paginated: offset 0, 20, 40, …) ─
         loc_id = extract_location_id_from_url(landed_url)
         if loc_id:
@@ -732,7 +934,7 @@ async def scrape_place(
                     break
                 await asyncio.sleep(random.uniform(0.5, 1.0))
 
-        # ── Parse GraphQL responses (tips + Q&A) ───────────────────────────
+        # ── Parse GraphQL responses (reviews + tips + Q&A) ───────────────────
         if graphql_responses:
             seen_ids: set[str] = set()
             all_keys: set[str] = set()
@@ -741,25 +943,29 @@ async def scrape_place(
                 for item in data if isinstance(data, list) else [data]:
                     if isinstance(item, dict):
                         all_keys.update((item.get("data") or {}).keys())
-                tips = parse_tips_from_graphql(data)
-                if not tips:
-                    tips = parse_qa_from_graphql(data)
-                for t in tips:
+                # Try main reviews first, then tips, then Q&A
+                extracted = parse_reviews_from_graphql(data)
+                if not extracted:
+                    extracted = parse_tips_from_graphql(data)
+                if not extracted:
+                    extracted = parse_qa_from_graphql(data)
+                for t in extracted:
                     rid = t.get("review_id") or ("qa_" + str(len(reviews)))
                     if rid not in seen_ids:
                         seen_ids.add(rid)
                         t["place_url"] = landed_url
                         t.setdefault("place_name", place_obj.get("name", "") if place_obj else "")
                         reviews.append(t)
-                if tips:
-                    Actor.log.info(f"  Extracted {len(tips)} tips/Q&A from GraphQL")
+                if extracted:
+                    Actor.log.info(f"  Extracted {len(extracted)} reviews/tips/Q&A from GraphQL")
             if not reviews and all_keys:
-                Actor.log.info(f"  GraphQL keys (no tips/Q&A): {sorted(all_keys)[:10]}")
+                Actor.log.info(f"  GraphQL keys (no reviews/tips/Q&A): {sorted(all_keys)[:15]}")
 
-        # Ensure all reviews have place_url and place_name
+        # Ensure all items have place_url, place_name, and source
         for r in reviews:
             r.setdefault("place_url", landed_url)
             r.setdefault("place_name", place_obj.get("name", "") if place_obj else "")
+            r.setdefault("source", "review")
 
         if not place_obj:
             place_obj = {"_type": "place", "url": landed_url, "name": "", "review_count": 0}
@@ -826,6 +1032,9 @@ async def scrape_place(
                 f"  Page {page_num}/{pages_to_fetch}: +{len(page_reviews)} reviews "
                 f"(total: {len(reviews)})"
             )
+
+        # Sort by date (newest first)
+        reviews.sort(key=_date_sort_key, reverse=True)
 
         if max_reviews:
             reviews = reviews[:max_reviews]

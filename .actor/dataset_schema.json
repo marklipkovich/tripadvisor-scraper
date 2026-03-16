@@ -7,6 +7,7 @@
 			"title": "Overview",
 			"transformation": {
 				"fields": [
+					"source",
 					"_type",
 					"name",
 					"url",
@@ -22,6 +23,10 @@
 			"display": {
 				"component": "table",
 				"properties": {
+					"source": {
+						"label": "Source",
+						"format": "text"
+					},
 					"_type": {
 						"label": "Type",
 						"format": "text"
@@ -126,6 +131,7 @@
 			"title": "Reviews",
 			"transformation": {
 				"fields": [
+					"source",
 					"_type",
 					"place_name",
 					"title",
@@ -141,6 +147,10 @@
 			"display": {
 				"component": "table",
 				"properties": {
+					"source": {
+						"label": "Source",
+						"format": "text"
+					},
 					"_type": {
 						"label": "Type",
 						"format": "text"
