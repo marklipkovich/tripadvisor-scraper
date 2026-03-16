@@ -491,6 +491,76 @@ async def extract_page_data(page: Page, url: str) -> tuple[Optional[dict], list[
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  DIRECT GRAPHQL: fetch tips via API (from cURL capture)
+# ══════════════════════════════════════════════════════════════════════════════
+
+TIPS_QUERY_ID = "13fbbde7cccdbabc"
+
+
+async def _get_user_id_from_page(page: Page) -> Optional[str]:
+    """Extract userId from page cookies (OptanonConsent consentId) if present."""
+    try:
+        cookies = await page.context.cookies()
+        for c in cookies:
+            if c.get("name") == "OptanonConsent" and c.get("value"):
+                # consentId=9F1729085B4241C14CB39B92E93A7D4F
+                m = re.search(r"consentId=([A-F0-9]+)", c["value"], re.I)
+                if m:
+                    return m.group(1)
+    except Exception:
+        pass
+    return None
+
+
+async def fetch_tips_via_graphql(
+    page: Page, location_id: str, offset: int = 0, limit: int = 10
+) -> Optional[list]:
+    """
+    Fetch location tips via GraphQL from within the browser session.
+    Matches cURL: locationId, offset, limit, language, useTaql, optional userId.
+    """
+    variables: dict = {
+        "locationId": int(location_id),
+        "offset": offset,
+        "limit": limit,
+        "language": "en",
+        "useTaql": True,
+    }
+    user_id = await _get_user_id_from_page(page)
+    if user_id:
+        variables["userId"] = user_id
+    payload = [
+        {"variables": variables, "extensions": {"preRegisteredQueryId": TIPS_QUERY_ID}}
+    ]
+    url = "https://www.tripadvisor.com/data/graphql/ids"
+    try:
+        result = await page.evaluate(
+            """
+            async (args) => {
+                const resp = await fetch(args.url, {
+                    method: 'POST',
+                    credentials: 'include',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Accept': '*/*',
+                        'Origin': 'https://www.tripadvisor.com',
+                        'Referer': window.location.href,
+                    },
+                    body: JSON.stringify(args.payload),
+                });
+                if (!resp.ok) return null;
+                return await resp.json();
+            }
+            """,
+            {"url": url, "payload": payload},
+        )
+        return result
+    except Exception as e:
+        Actor.log.warning(f"  GraphQL tips fetch failed: {e}")
+        return None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  PAGINATION: build URL with offset
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -635,8 +705,35 @@ async def scrape_place(
 
         place_obj, reviews = await extract_page_data(page, landed_url)
 
-        # ── Fallback: use GraphQL responses if DOM returned nothing ───────
-        if not reviews and graphql_responses:
+        # ── Direct GraphQL fetch for tips (paginated: offset 0, 20, 40, …) ─
+        loc_id = extract_location_id_from_url(landed_url)
+        if loc_id:
+            tips_per_page = 20
+            tips_offset = 0
+            while True:
+                tips_resp = await fetch_tips_via_graphql(
+                    page, loc_id, offset=tips_offset, limit=tips_per_page
+                )
+                if not tips_resp:
+                    break
+                tips = parse_tips_from_graphql(
+                    tips_resp if isinstance(tips_resp, list) else [tips_resp]
+                )
+                if not tips:
+                    break
+                graphql_responses.append(tips_resp)
+                Actor.log.info(
+                    f"  Fetched tips via GraphQL (offset={tips_offset}): {len(tips)} items"
+                )
+                tips_offset += tips_per_page
+                if len(tips) < tips_per_page:
+                    break
+                if max_reviews and tips_offset >= max_reviews:
+                    break
+                await asyncio.sleep(random.uniform(0.5, 1.0))
+
+        # ── Parse GraphQL responses (tips + Q&A) ───────────────────────────
+        if graphql_responses:
             seen_ids: set[str] = set()
             all_keys: set[str] = set()
             for resp in graphql_responses:
