@@ -37,6 +37,21 @@
 			"default": {
 				"useApifyProxy": false
 			}
+		},
+		"captchaWaitSeconds": {
+			"title": "Captcha wait (seconds)",
+			"type": "integer",
+			"description": "If captcha appears before scraping, set this to give time to solve it (e.g. 15–30). The actor will wait this many seconds with a message to solve captcha if visible. Use when captcha always appears but is not auto-detected.",
+			"default": 0,
+			"minimum": 0,
+			"maximum": 120,
+			"unit": "seconds"
+		},
+		"debugCaptcha": {
+			"title": "Debug captcha",
+			"type": "boolean",
+			"description": "When true, logs all page elements that might be captcha-related (id/class containing captcha, px, challenge, verify). Run with captcha visible to find the right selector.",
+			"default": false
 		}
 	},
 	"required": ["startUrls"]

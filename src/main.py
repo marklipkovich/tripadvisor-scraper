@@ -378,24 +378,34 @@ def parse_tips_from_graphql(data: list) -> list[dict]:
 #  BROWSER CONTEXT
 # ══════════════════════════════════════════════════════════════════════════════
 
-async def make_context(playwright, proxy_url: Optional[str] = None):
-    """Launch Playwright Chromium with randomised fingerprint."""
+def _browser_launch_args(fp: dict) -> list:
+    """Common launch args for Chromium."""
+    return [
+        "--disable-blink-features=AutomationControlled",
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-setuid-sandbox",
+        "--disable-gpu",
+        f"--user-agent={fp['user_agent']}",
+    ]
+
+
+async def make_browser(playwright):
+    """Launch Playwright Chromium once. Reuse for all places."""
     fp = random_fingerprint()
+    Actor.log.info(f"  Browser: Chrome/{fp['chrome_version']}")
+    browser = await playwright.chromium.launch(
+        headless=False,
+        args=_browser_launch_args(fp),
+    )
+    return browser, fp
+
+
+async def make_context(browser, fp: dict, proxy_url: Optional[str] = None):
+    """Create a new context from an existing browser (one per place). Uses same fingerprint for all places to avoid captcha on second+ place."""
     Actor.log.info(
         f"  Fingerprint: Chrome/{fp['chrome_version']} | "
         f"{fp['viewport']['width']}×{fp['viewport']['height']}"
-    )
-
-    browser = await playwright.chromium.launch(
-        headless=False,
-        args=[
-            "--disable-blink-features=AutomationControlled",
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-setuid-sandbox",
-            "--disable-gpu",
-            f"--user-agent={fp['user_agent']}",
-        ],
     )
 
     ctx_kwargs: dict = dict(
@@ -424,7 +434,7 @@ async def make_context(playwright, proxy_url: Optional[str] = None):
         window.chrome = { runtime: {} };
     """)
 
-    return browser, context
+    return context
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -635,7 +645,7 @@ async def fetch_reviews_via_graphql(
     """
     variables = {
         "locationId": int(location_id),
-        "filters": [{"axis": "LANGUAGE", "selections": ["en"]}],
+        "filters": [],  # No language filter = all languages (was ["en"] only, missing ~10–15% of reviews)
         "limit": limit,
         "offset": offset,
         "sortType": None,
@@ -906,13 +916,17 @@ PUSH_BATCH_SIZE = 50
 
 
 async def scrape_place(
-    playwright,
+    browser,
+    fingerprint: dict,
     place_url: str,
     max_reviews: Optional[int],
     proxy_url: Optional[str],
+    shared_context=None,
     start_date: Optional[str] = None,
     place_idx: int = 1,
     total_places: int = 1,
+    captcha_wait_seconds: int = 0,
+    debug_captcha: bool = False,
 ) -> tuple[Optional[dict], int]:
     """
     Scrape a single TripAdvisor place (hotel, restaurant, attraction).
@@ -926,7 +940,10 @@ async def scrape_place(
 
     await Actor.set_status_message("Loading …")
 
-    browser, context = await make_context(playwright, proxy_url)
+    if shared_context is not None:
+        context = shared_context
+    else:
+        context = await make_context(browser, fingerprint, proxy_url)
     page = await context.new_page()
 
     # Collect GraphQL responses (CommunityUGC__locationTips, etc.)
@@ -963,40 +980,158 @@ async def scrape_place(
                 label=f"goto fallback {place_url[:50]}",
             )
 
-        await asyncio.sleep(random.uniform(3.0, 5.0))
+        # Captcha appears only on first place — skip check for place 2+
+        if place_idx == 1:
+            await asyncio.sleep(random.uniform(7.0, 10.0))  # Captcha may load with delay
+        else:
+            await asyncio.sleep(random.uniform(2.0, 3.0))  # Short wait for page stability
 
-        # ── Check for PerimeterX / captcha (TripAdvisor uses PerimeterX) ─────
-        # PerimeterX renders into #px-captcha; when solved, element is hidden/removed
-        Actor.log.info("  Checking for captcha …")
-        captcha_selectors = [
-            "#px-captcha",  # PerimeterX (TripAdvisor uses this)
-            "[id*='px-captcha']",
-            "[class*='px-captcha']",
-            "iframe[src*='recaptcha']",
-            "iframe[src*='challenges.cloudflare']",
-            "iframe[title*='reCAPTCHA']",
-        ]
-        captcha_found = False
-        for attempt in range(3):  # Captcha may load with delay
-            for sel in captcha_selectors:
-                try:
-                    loc = page.locator(sel).first
-                    if await loc.is_visible(timeout=4000):
-                        Actor.log.warning(f"  Captcha detected ({sel}) — waiting up to 90s for manual solve")
-                        await Actor.set_status_message("Captcha detected — please solve manually")
-                        await loc.wait_for(state="hidden", timeout=90_000)
-                        Actor.log.info("  Captcha resolved — continuing")
-                        await Actor.set_status_message("Captcha resolved — continuing")
-                        captcha_found = True
-                        break
-                except Exception:
-                    pass
-            if captcha_found:
-                break
-            if attempt < 2:
-                await asyncio.sleep(2.0)
-        if not captcha_found:
-            Actor.log.info("  No captcha detected — continuing")
+        if place_idx == 1:
+            # ── Check for TripAdvisor captcha ("Verification Required" / "Slide right") ─
+            Actor.log.info("  Checking for captcha …")
+
+        async def _debug_captcha_elements() -> None:
+            try:
+                iframes = await page.evaluate("""
+                    () => Array.from(document.querySelectorAll('iframe'))
+                        .map(f => (f.src || '').slice(0, 100))
+                """)
+                captcha_iframes = [s for s in iframes if any(k in s.lower() for k in ['captcha', 'recaptcha', 'turnstile', 'challenge', 'verify'])]
+                if captcha_iframes:
+                    Actor.log.info(f"  [DEBUG] Captcha iframes: {captcha_iframes}")
+                else:
+                    Actor.log.info(f"  [DEBUG] Iframes: {iframes[:5]}{'…' if len(iframes) > 5 else ''}")
+            except Exception as e:
+                Actor.log.warning(f"  [DEBUG] Captcha debug failed: {e}")
+
+        if place_idx == 1:
+            if debug_captcha:
+                await _debug_captcha_elements()
+            # TripAdvisor captcha: "Verification Required" + "Slide right to secure your access"
+            captcha_texts = [
+                "Verification Required",
+                "Slide right to secure your access",
+                "Slide right",
+                "Verification required",
+            ]
+            captcha_selectors = [
+                "#px-captcha",
+                "[id*='px-captcha']",
+                "[class*='px-captcha']",
+                "iframe[src*='captcha-delivery.com']",  # PerimeterX / TripAdvisor
+                "iframe[src*='recaptcha']",
+                "iframe[src*='challenges.cloudflare']",
+                "iframe[title*='reCAPTCHA']",
+            ]
+            captcha_found = False
+            for attempt in range(3):
+                for text in captcha_texts:
+                    try:
+                        loc = page.get_by_text(text, exact=False).first
+                        if await loc.is_visible(timeout=3000):
+                            Actor.log.warning(f"  Captcha detected (text: '{text}') — waiting up to 90s for manual solve")
+                            await Actor.set_status_message("Captcha detected — please solve manually")
+                            await loc.wait_for(state="hidden", timeout=90_000)
+                            Actor.log.info("  Captcha resolved — continuing")
+                            await Actor.set_status_message("Captcha resolved — continuing")
+                            captcha_found = True
+                            break
+                    except Exception:
+                        pass
+                if captcha_found:
+                    break
+                # Also check inside iframes (captcha may be in cross-origin iframe)
+                for frame in page.frames:
+                    if frame != page.main_frame:
+                        try:
+                            loc = frame.get_by_text("Verification Required", exact=False).first
+                            if await loc.is_visible(timeout=2000):
+                                Actor.log.warning("  Captcha detected (in iframe: 'Verification Required') — waiting up to 90s for manual solve")
+                                await Actor.set_status_message("Captcha detected — please solve manually")
+                                resolved = False
+                                try:
+                                    await loc.wait_for(state="detached", timeout=90_000)
+                                    resolved = True
+                                except Exception as e:
+                                    err = str(e).lower()
+                                    if "detached" in err or "target" in err or "frame" in err or "closed" in err:
+                                        resolved = True
+                                    else:
+                                        try:
+                                            await loc.wait_for(state="hidden", timeout=5_000)
+                                            resolved = True
+                                        except Exception:
+                                            pass
+                                if resolved:
+                                    Actor.log.info("  Captcha resolved — continuing")
+                                    await Actor.set_status_message("Captcha resolved — continuing")
+                                    captcha_found = True
+                                    break
+                        except Exception:
+                            pass
+                if captcha_found:
+                    break
+                for sel in captcha_selectors:
+                    try:
+                        loc = page.locator(sel).first
+                        if await loc.is_visible(timeout=3000):
+                            Actor.log.warning(f"  Captcha detected ({sel}) — waiting up to 90s for manual solve")
+                            await Actor.set_status_message("Captcha detected — please solve manually")
+                            try:
+                                await loc.wait_for(state="detached", timeout=90_000)
+                            except Exception as e:
+                                if "detached" not in str(e).lower() and "frame" not in str(e).lower():
+                                    await loc.wait_for(state="hidden", timeout=5_000)
+                            Actor.log.info("  Captcha resolved — continuing")
+                            await Actor.set_status_message("Captcha resolved — continuing")
+                            captcha_found = True
+                            break
+                    except Exception:
+                        pass
+                if captcha_found:
+                    break
+                if attempt < 2:
+                    await asyncio.sleep(2.0)
+            if not captcha_found:
+                Actor.log.info("  No captcha detected — continuing")
+
+        # ── Optional: wait for user to solve captcha (first place only) ─
+        if place_idx == 1 and captcha_wait_seconds > 0:
+            Actor.log.warning(f"  Waiting {captcha_wait_seconds}s for captcha — solve it now if visible")
+            await Actor.set_status_message(f"Solve captcha if visible — waiting {captcha_wait_seconds}s")
+            elapsed = 0
+            while elapsed < captcha_wait_seconds:
+                chunk = min(5, captcha_wait_seconds - elapsed)
+                await asyncio.sleep(chunk)
+                elapsed += chunk
+                if debug_captcha and elapsed == 5:
+                    Actor.log.info("  [DEBUG] Re-checking iframes (after 5s):")
+                    await _debug_captcha_elements()
+                if elapsed < captcha_wait_seconds:
+                    Actor.log.info(f"  … {captcha_wait_seconds - elapsed}s remaining")
+            Actor.log.info("  Captcha wait complete — continuing")
+            await Actor.set_status_message("Continuing …")
+            # Re-check for captcha (may have loaded during wait)
+            for frame in page.frames:
+                if frame != page.main_frame:
+                    try:
+                        loc = frame.get_by_text("Verification Required", exact=False).first
+                        if await loc.is_visible(timeout=1500):
+                            Actor.log.warning("  Captcha detected (re-check) — waiting up to 90s for manual solve")
+                            await Actor.set_status_message("Captcha detected — please solve manually")
+                            try:
+                                await loc.wait_for(state="detached", timeout=90_000)
+                            except Exception as e:
+                                if "detached" not in str(e).lower() and "frame" not in str(e).lower():
+                                    try:
+                                        await loc.wait_for(state="hidden", timeout=5_000)
+                                    except Exception:
+                                        pass
+                            Actor.log.info("  Captcha resolved — continuing")
+                            await Actor.set_status_message("Captcha resolved — continuing")
+                            break
+                    except Exception:
+                        pass
 
         # ── Wait for page to be ready ───────────────────────────────────────
         Actor.log.info("  Waiting for page to be ready …")
@@ -1078,9 +1213,17 @@ async def scrape_place(
         total_pushed = 0
         oldest_date = ""
         start_ts = (start_date.strip()[:10] if start_date and start_date.strip() else "") or ""
+        # Cap at TripAdvisor's reported count to avoid API returning extra/padded items
+        page_review_count = (
+            place_obj.get("review_count") or place_obj.get("reviewCount") or 0
+        ) if place_obj else 0
 
         async def _push_batch(batch: list[dict]) -> None:
             nonlocal total_pushed, oldest_date
+            if page_review_count and total_pushed + len(batch) > page_review_count:
+                batch = batch[: page_review_count - total_pushed]
+            if not batch:
+                return
             for item in batch:
                 await Actor.push_data(item)
             total_pushed += len(batch)
@@ -1108,6 +1251,8 @@ async def scrape_place(
             reviews_offset = 0
             while True:
                 if max_reviews and total_pushed + len(reviews) >= max_reviews:
+                    break
+                if page_review_count and total_pushed + len(reviews) >= page_review_count:
                     break
                 # Fetch PARALLEL_REQUESTS offsets in parallel
                 batch_offsets = [
@@ -1148,8 +1293,11 @@ async def scrape_place(
                             reviews.append(t)
                     if len(extracted) < reviews_per_page:
                         got_partial = True
-                        break
+                        Actor.log.debug(f"  Partial response at offset {batch_offsets[i]}: {len(extracted)} reviews")
+                    # Don't break inner loop — process remaining responses in this batch
                 if not got_any or got_partial:
+                    if got_partial:
+                        Actor.log.info(f"  Reached end of reviews at offset ~{reviews_offset} (last batch had partial)")
                     break
                 reviews_offset += PARALLEL_REQUESTS * reviews_per_page
                 if max_reviews and reviews_offset >= max_reviews:
@@ -1159,6 +1307,8 @@ async def scrape_place(
                 reviews.sort(key=_date_sort_key, reverse=True)
                 if max_reviews:
                     reviews = reviews[: max_reviews - total_pushed]
+                if page_review_count:
+                    reviews = reviews[: page_review_count - total_pushed]
                 while len(reviews) >= PUSH_BATCH_SIZE:
                     batch = reviews[:PUSH_BATCH_SIZE]
                     reviews = reviews[PUSH_BATCH_SIZE:]
@@ -1174,6 +1324,8 @@ async def scrape_place(
         reviews.sort(key=_date_sort_key, reverse=True)
         if max_reviews:
             reviews = reviews[: max_reviews - total_pushed]
+        if page_review_count:
+            reviews = reviews[: page_review_count - total_pushed]
         if reviews:
             await _push_batch(reviews)
 
@@ -1199,8 +1351,8 @@ async def scrape_place(
 
     finally:
         await page.close()
-        await context.close()
-        await browser.close()
+        if shared_context is None:
+            await context.close()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1220,6 +1372,8 @@ async def main() -> None:
         raw_urls = actor_input.get("startUrls") or actor_input.get("start_urls") or []
         max_reviews: Optional[int] = actor_input.get("maxReviewsPerPlace")
         start_date: Optional[str] = actor_input.get("startDate") or ""
+        captcha_wait: int = int(actor_input.get("captchaWaitSeconds") or 0)
+        debug_captcha: bool = bool(actor_input.get("debugCaptcha"))
         proxy_input = actor_input.get("proxyConfiguration")
 
         INTER_PLACE_DELAY = 2.0
@@ -1233,6 +1387,10 @@ async def main() -> None:
         Actor.log.info(f"Max reviews/place: {max_reviews or 'unlimited'}")
         if start_date:
             Actor.log.info(f"Start date filter: {start_date}")
+        if captcha_wait:
+            Actor.log.info(f"Captcha wait: {captcha_wait}s (solve captcha when prompted)")
+        if debug_captcha:
+            Actor.log.info("Captcha debug: ON — will log captcha-related elements")
         Actor.log.info(f"Inter-place delay: {INTER_PLACE_DELAY}s (+ 0–1s jitter)")
 
         proxy_configuration = None
@@ -1255,47 +1413,61 @@ async def main() -> None:
         total_reviews = 0
 
         async with async_playwright() as pw:
-            for idx, entry in enumerate(raw_urls, 1):
-                url = (
-                    entry.get("url") if isinstance(entry, dict) else entry
-                )
-                if not url or not str(url).strip():
-                    Actor.log.warning(f"Skipping empty entry at index {idx}.")
-                    continue
+            browser, fingerprint = await make_browser(pw)
+            shared_ctx = None
+            try:
+                for idx, entry in enumerate(raw_urls, 1):
+                    url = (
+                        entry.get("url") if isinstance(entry, dict) else entry
+                    )
+                    if not url or not str(url).strip():
+                        Actor.log.warning(f"Skipping empty entry at index {idx}.")
+                        continue
 
-                place_url = normalize_place_url(str(url))
-                if not place_url:
-                    Actor.log.warning(f"Invalid URL at index {idx}: {url}")
-                    continue
+                    place_url = normalize_place_url(str(url))
+                    if not place_url:
+                        Actor.log.warning(f"Invalid URL at index {idx}: {url}")
+                        continue
 
-                Actor.log.info(f"[{idx}/{len(raw_urls)}] Processing: {place_url[:70]}...")
+                    Actor.log.info(f"[{idx}/{len(raw_urls)}] Processing: {place_url[:70]}...")
 
-                proxy_url: Optional[str] = None
-                if proxy_configuration:
-                    loc_id = extract_location_id_from_url(place_url) or f"place_{idx}"
-                    proxy_url = await proxy_configuration.new_url(
-                        session_id=re.sub(r"[^\w]", "_", loc_id)
+                    proxy_url: Optional[str] = None
+                    if proxy_configuration:
+                        loc_id = extract_location_id_from_url(place_url) or f"place_{idx}"
+                        proxy_url = await proxy_configuration.new_url(
+                            session_id=re.sub(r"[^\w]", "_", loc_id)
+                        )
+
+                    # Reuse one context when no proxy — keeps one window, avoids new window per place
+                    if shared_ctx is None and not proxy_url:
+                        shared_ctx = await make_context(browser, fingerprint, None)
+
+                    place_obj, pushed = await scrape_place(
+                        browser, fingerprint, place_url, max_reviews, proxy_url,
+                        shared_context=shared_ctx if not proxy_url else None,
+                        start_date=start_date or None,
+                        place_idx=idx,
+                        total_places=len(raw_urls),
+                        captcha_wait_seconds=captcha_wait,
+                        debug_captcha=debug_captcha,
                     )
 
-                place_obj, pushed = await scrape_place(
-                    pw, place_url, max_reviews, proxy_url,
-                    start_date=start_date or None,
-                    place_idx=idx,
-                    total_places=len(raw_urls),
-                )
+                    if place_obj:
+                        kv_key = f"place-{extract_location_id_from_url(place_url) or idx}"
+                        await Actor.set_value(kv_key, place_obj)
+                        total_places += 1
 
-                if place_obj:
-                    kv_key = f"place-{extract_location_id_from_url(place_url) or idx}"
-                    await Actor.set_value(kv_key, place_obj)
-                    total_places += 1
+                    total_reviews += pushed
 
-                total_reviews += pushed
-
-                if idx < len(raw_urls):
-                    jitter = random.uniform(0.0, 1.0)
-                    delay = INTER_PLACE_DELAY + jitter
-                    Actor.log.info(f"  Inter-place delay: {delay:.1f}s …")
-                    await asyncio.sleep(delay)
+                    if idx < len(raw_urls):
+                        jitter = random.uniform(0.0, 1.0)
+                        delay = INTER_PLACE_DELAY + jitter
+                        Actor.log.info(f"  Inter-place delay: {delay:.1f}s …")
+                        await asyncio.sleep(delay)
+            finally:
+                if shared_ctx:
+                    await shared_ctx.close()
+                await browser.close()
 
         final_msg = (
             f"Finished — "
