@@ -552,7 +552,8 @@ async def extract_page_data(page: Page, url: str) -> tuple[Optional[dict], list[
 # ══════════════════════════════════════════════════════════════════════════════
 
 TIPS_QUERY_ID = "13fbbde7cccdbabc"
-REVIEWS_QUERY_ID = "a74001171c4cc850"  # From cURL_reviews.txt — main hotel reviews
+# Full hotel reviews API (from devtools/cURL.txt, Response.txt)
+REVIEWS_QUERY_ID = "ef1a9f94012220d3"  # ReviewsProxy_getReviewListPageForLocation
 
 
 async def _get_user_id_from_page(page: Page) -> Optional[str]:
@@ -622,13 +623,19 @@ async def fetch_reviews_via_graphql(
     page: Page, location_id: str, offset: int = 0, limit: int = 10
 ) -> Optional[list]:
     """
-    Fetch main hotel reviews via GraphQL (from cURL_reviews.txt).
-    Query a74001171c4cc850: locationId, offset (0, 10, 20...), limit.
+    Fetch full hotel reviews via ReviewsProxy_getReviewListPageForLocation.
+    Query ef1a9f94012220d3 (from devtools/cURL.txt).
     """
-    variables: dict = {
+    variables = {
         "locationId": int(location_id),
-        "offset": offset,
+        "filters": [{"axis": "LANGUAGE", "selections": ["en"]}],
         "limit": limit,
+        "offset": offset,
+        "sortType": None,
+        "sortBy": "SERVER_DETERMINED",
+        "language": "en",
+        "doMachineTranslation": True,
+        "photosPerReviewLimit": 3,
     }
     payload = [
         {"variables": variables, "extensions": {"preRegisteredQueryId": REVIEWS_QUERY_ID}}
@@ -661,10 +668,51 @@ async def fetch_reviews_via_graphql(
         return None
 
 
+def _extract_reviews_from_obj(obj: Any, results: list[dict]) -> None:
+    """Recursively find review-like objects (have text/body + user/author)."""
+    if not obj or len(results) > 5000:
+        return
+    if isinstance(obj, dict):
+        text = obj.get("text") or obj.get("body") or obj.get("review") or ""
+        if isinstance(text, dict):
+            text = text.get("text") or text.get("body") or ""
+        has_content = (text and len(str(text).strip()) > 20) or obj.get("title")
+        user = obj.get("user") or obj.get("userProfile") or obj.get("author") or {}
+        if has_content and (user or obj.get("rating") is not None or obj.get("objectId")):
+            name = (
+                (user.get("displayName") or user.get("name") or user.get("username") or "")
+                if isinstance(user, dict) else ""
+            )
+            date_val = (
+                obj.get("publishedDate") or obj.get("createdAt") or obj.get("date")
+                or obj.get("submittedDateTime") or ""
+            )
+            rid = str(obj.get("id") or obj.get("reviewId") or obj.get("objectId") or len(results))
+            results.append({
+                "_type": "review",
+                "source": "review",
+                "review_id": rid,
+                "title": (obj.get("title") or "").strip(),
+                "text": (str(text) or "").strip()[:10000],
+                "rating": float(obj["rating"]) if isinstance(obj.get("rating"), (int, float)) else None,
+                "date": str(date_val)[:50] if date_val else "",
+                "trip_type": (obj.get("tripType") or (obj.get("tripInfo") or {}).get("tripType") or ""),
+                "reviewer_name": name,
+                "helpful_votes": int(obj.get("helpfulVotes") or obj.get("helpful_votes") or 0),
+                "management_response": (obj.get("managementResponse") or obj.get("management_response") or "").strip()[:2000] or "",
+            })
+            return  # Don't recurse into this object's children (already extracted)
+        for v in obj.values():
+            _extract_reviews_from_obj(v, results)
+    elif isinstance(obj, list):
+        for v in obj:
+            _extract_reviews_from_obj(v, results)
+
+
 def parse_reviews_from_graphql(data: list) -> list[dict]:
     """
     Extract main hotel reviews from GraphQL response.
-    Tries common keys: LocationReviews__getReviews, reviews, reviewList, etc.
+    Tries known keys first, then recursively searches for review-like objects.
     """
     results: list[dict] = []
     if not isinstance(data, list):
@@ -675,63 +723,85 @@ def parse_reviews_from_graphql(data: list) -> list[dict]:
         inner = item.get("data") or {}
         if not isinstance(inner, dict):
             continue
-        # Try known keys (order matters)
-        reviews_data = (
-            inner.get("LocationReviews__getReviews")
-            or inner.get("LocationReviews")
-            or inner.get("reviews")
-            or inner.get("reviewList")
-        )
-        if reviews_data is None:
+        # Skip tips — CommunityUGC__locationTips are tips, not full reviews
+        if "CommunityUGC__locationTips" in inner:
             continue
-        # Handle nested structure: { reviews: [...] } or direct array
-        if isinstance(reviews_data, dict):
-            reviews_list = reviews_data.get("reviews") or reviews_data.get("reviewList") or []
+        # Try known keys (order matters)
+        # ReviewsProxy_getReviewListPageForLocation (from devtools/Response.txt)
+        reviews_proxy = inner.get("ReviewsProxy_getReviewListPageForLocation")
+        if isinstance(reviews_proxy, list) and reviews_proxy:
+            first = reviews_proxy[0]
+            if isinstance(first, dict):
+                reviews_data = first.get("reviews")
+            else:
+                reviews_data = None
         else:
-            reviews_list = reviews_data if isinstance(reviews_data, list) else []
-        for r in reviews_list:
-            if not isinstance(r, dict):
-                continue
-            text = (
-                r.get("text")
-                or r.get("body")
-                or r.get("review")
-                or dig(r, "snippets", 0, "text")
-                or ""
+            reviews_data = None
+        if reviews_data is None:
+            reviews_data = (
+                inner.get("LocationReviews__getReviews")
+                or inner.get("SocialData_getSocialObjects")
+                or inner.get("SocialData")
+                or inner.get("LocationReviews")
+                or inner.get("reviews")
+                or inner.get("reviewList")
             )
-            if not text and not r.get("title"):
-                continue
-            user = r.get("user") or r.get("userProfile") or r.get("author") or {}
-            name = (
-                user.get("displayName")
-                or user.get("name")
-                or user.get("username")
-                or ""
-            ) if isinstance(user, dict) else ""
-            rating = r.get("rating")
-            if rating is None and isinstance(r.get("tripInfo"), dict):
-                rating = r.get("tripInfo", {}).get("rating")
-            date_val = (
-                r.get("publishedDate")
-                or r.get("createdAt")
-                or r.get("date")
-                or r.get("submittedDateTime")
-                or ""
-            )
-            rid = str(r.get("id") or r.get("reviewId") or r.get("objectId") or len(results))
-            results.append({
-                "_type": "review",
-                "source": "review",
-                "review_id": rid,
-                "title": (r.get("title") or "").strip(),
-                "text": (text or "").strip() if isinstance(text, str) else str(text).strip(),
-                "rating": float(rating) if rating is not None else None,
-                "date": str(date_val)[:50] if date_val else "",
-                "trip_type": (r.get("tripType") or (r.get("tripInfo") or {}).get("tripType") or ""),
-                "reviewer_name": name,
+        if reviews_data is not None:
+            if isinstance(reviews_data, dict):
+                reviews_list = reviews_data.get("reviews") or reviews_data.get("reviewList") or reviews_data.get("socialObjects") or []
+            else:
+                reviews_list = reviews_data if isinstance(reviews_data, list) else []
+            for r in (reviews_list if isinstance(reviews_list, list) else []):
+                if not isinstance(r, dict):
+                    continue
+                text = (
+                    r.get("text")
+                    or r.get("body")
+                    or r.get("review")
+                    or dig(r, "snippets", 0, "text")
+                    or ""
+                )
+                if not text and not r.get("title"):
+                    continue
+                user = r.get("user") or r.get("userProfile") or r.get("author") or {}
+                name = (
+                    user.get("displayName")
+                    or user.get("name")
+                    or user.get("username")
+                    or ""
+                ) if isinstance(user, dict) else ""
+                rating = r.get("rating")
+                if rating is None and isinstance(r.get("tripInfo"), dict):
+                    rating = r.get("tripInfo", {}).get("rating")
+                date_val = (
+                    r.get("publishedDate")
+                    or r.get("createdAt")
+                    or r.get("date")
+                    or r.get("submittedDateTime")
+                    or ""
+                )
+                rid = str(r.get("id") or r.get("reviewId") or r.get("objectId") or len(results))
+                results.append({
+                    "_type": "review",
+                    "source": "review",
+                    "review_id": rid,
+                    "title": (r.get("title") or "").strip(),
+                    "text": (text or "").strip() if isinstance(text, str) else str(text).strip(),
+                    "rating": float(rating) if rating is not None else None,
+                    "date": str(date_val)[:50] if date_val else "",
+                    "trip_type": (r.get("tripType") or (r.get("tripInfo") or {}).get("tripType") or ""),
+                    "reviewer_name": name,
                 "helpful_votes": int(r.get("helpfulVotes") or r.get("helpful_votes") or 0),
-                "management_response": (r.get("managementResponse") or r.get("management_response") or "").strip()[:2000] or "",
-            })
+                "management_response": (
+                    (r.get("mgmtResponse") or {}).get("text")
+                    or r.get("managementResponse")
+                    or r.get("management_response")
+                    or ""
+                ).strip()[:2000] or "",
+                })
+        # Fallback: recursively search for review-like objects in the response
+        if not results:
+            _extract_reviews_from_obj(inner, results)
     return results
 
 
