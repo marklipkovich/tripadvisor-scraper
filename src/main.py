@@ -225,38 +225,38 @@ def parse_qa_from_graphql(data: list) -> list[dict]:
         qa_data = inner.get("QuestionsAndAnswers_getQuestionsByLocations")
         if qa_data is None:
             continue
-        # Can be list of blocks or single object with questions
         blocks = qa_data if isinstance(qa_data, list) else [qa_data]
         for block in blocks:
             if not isinstance(block, dict):
                 continue
-            questions = block.get("questions") or block.get("question") or []
+            questions = block.get("questions") or []
             if not isinstance(questions, list):
-                questions = [questions] if questions else []
+                continue
             for q in questions:
                 if not isinstance(q, dict):
                     continue
-                text = q.get("text") or q.get("question") or ""
-                answers = q.get("answers") or q.get("answer") or []
+                content = q.get("content") or q.get("text") or ""
+                if not content:
+                    continue
+                answers = q.get("answers") or q.get("posts") or []
                 if not isinstance(answers, list):
-                    answers = [answers] if answers else []
+                    answers = []
                 ans_text = " | ".join(
-                    str(a.get("text") or a.get("answer") or "")[:500]
+                    str(a.get("content") or a.get("text") or a.get("answer") or "")[:500]
                     for a in answers if isinstance(a, dict)
                 )
-                if text or ans_text:
-                    results.append({
-                        "_type": "review",
-                        "review_id": str(q.get("id") or len(results)),
-                        "title": (text[:200] if text else "Q&A")[:200],
-                        "text": ans_text or text,
-                        "rating": None,
-                        "date": "",
-                        "trip_type": "Q&A",
-                        "reviewer_name": "",
-                        "helpful_votes": 0,
-                        "management_response": "",
-                    })
+                results.append({
+                    "_type": "review",
+                    "review_id": str(q.get("id") or len(results)),
+                    "title": content[:200],
+                    "text": ans_text or content,
+                    "rating": None,
+                    "date": q.get("submittedDateTime") or "",
+                    "trip_type": "Q&A",
+                    "reviewer_name": "",
+                    "helpful_votes": q.get("postCount") or 0,
+                    "management_response": "",
+                })
     return results
 
 
@@ -658,16 +658,6 @@ async def scrape_place(
                     Actor.log.info(f"  Extracted {len(tips)} tips/Q&A from GraphQL")
             if not reviews and all_keys:
                 Actor.log.info(f"  GraphQL keys (no tips/Q&A): {sorted(all_keys)[:10]}")
-                # Debug: log Q&A structure to fix parser
-                if "QuestionsAndAnswers_getQuestionsByLocations" in all_keys:
-                    for resp in graphql_responses:
-                        data = resp if isinstance(resp, list) else [resp]
-                        for item in data if isinstance(data, list) else [data]:
-                            if isinstance(item, dict):
-                                qa = (item.get("data") or {}).get("QuestionsAndAnswers_getQuestionsByLocations")
-                                if qa is not None:
-                                    Actor.log.info(f"  Q&A structure sample: {str(qa)[:600]}...")
-                                    break
 
         # Ensure all reviews have place_url and place_name
         for r in reviews:
