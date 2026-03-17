@@ -15,6 +15,7 @@ Strategy (JSON-first, DOM fallback):
     • Fetches each page; can scale to thousands of reviews per place
 
 Anti-blocking stack:
+  • playwright-stealth — masks webdriver, plugins, languages, chrome
   • Chrome fingerprint rotation — randomises UA, viewport, Sec-Ch-Ua
   • Viewport randomisation — 1366×768 / 1440×900 / 1920×1080
   • One proxy session per place — consistent IP for session
@@ -26,13 +27,19 @@ Anti-blocking stack:
 from __future__ import annotations
 
 import asyncio
+import json
 import random
 import re
+import time
 from typing import Any, Optional
 from urllib.parse import urlparse
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
+
 from apify import Actor
 from crawlee.events import Event
 from patchright.async_api import async_playwright, Page
+from playwright_stealth import Stealth
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -395,13 +402,89 @@ async def make_browser(playwright):
     fp = random_fingerprint()
     Actor.log.info(f"  Browser: Chrome/{fp['chrome_version']}")
     browser = await playwright.chromium.launch(
-        headless=False,
+        headless=True,
         args=_browser_launch_args(fp),
     )
     return browser, fp
 
 
-async def make_context(browser, fp: dict, proxy_url: Optional[str] = None):
+def _proxy_info_to_playwright(proxy_info) -> dict:
+    """Convert Apify ProxyInfo to Playwright proxy dict (server, username, password)."""
+    return {
+        "server": f"{proxy_info.scheme}://{proxy_info.hostname}:{proxy_info.port}",
+        "username": proxy_info.username or "",
+        "password": proxy_info.password or "",
+    }
+
+
+def _solve_datadome_2captcha(
+    api_key: str,
+    captcha_url: str,
+    website_url: str,
+    user_agent: str,
+    proxy_setting: dict,
+) -> Optional[str]:
+    """
+    Solve DataDome captcha via 2Captcha API. Returns datadome cookie string or None.
+    Requires proxy — 2Captcha DataDome solver needs proxy to load the captcha.
+    """
+    if "t=bv" in captcha_url:
+        Actor.log.warning("  2Captcha: t=bv in captcha URL — IP may be banned, rotate proxy")
+        return None
+    parsed = urlparse(proxy_setting.get("server", "http://localhost:8080"))
+    proxy_host = parsed.hostname or "localhost"
+    proxy_port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    proxy_user = proxy_setting.get("username") or ""
+    proxy_pass = proxy_setting.get("password") or ""
+    task = {
+        "type": "DataDomeSliderTask",
+        "websiteURL": website_url,
+        "captchaUrl": captcha_url,
+        "userAgent": user_agent,
+        "proxyType": "http",
+        "proxyAddress": proxy_host,
+        "proxyPort": proxy_port,
+    }
+    if proxy_user:
+        task["proxyLogin"] = proxy_user
+    if proxy_pass:
+        task["proxyPassword"] = proxy_pass
+    try:
+        req = Request(
+            "https://api.2captcha.com/createTask",
+            data=json.dumps({"clientKey": api_key, "task": task}).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(req, timeout=30) as r:
+            create_resp = json.loads(r.read().decode())
+        if create_resp.get("errorId", 1) != 0:
+            Actor.log.warning(f"  2Captcha createTask error: {create_resp.get('errorDescription', 'unknown')}")
+            return None
+        task_id = create_resp.get("taskId")
+        if not task_id:
+            return None
+        for _ in range(60):
+            time.sleep(5)
+            req = Request(
+                f"https://api.2captcha.com/getTaskResult",
+                data=json.dumps({"clientKey": api_key, "taskId": task_id}).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urlopen(req, timeout=30) as r:
+                result = json.loads(r.read().decode())
+            if result.get("status") == "ready":
+                return result.get("solution", {}).get("cookie")
+            if result.get("errorId", 0) != 0:
+                Actor.log.warning(f"  2Captcha getResult error: {result.get('errorDescription', 'unknown')}")
+                return None
+    except (HTTPError, URLError, json.JSONDecodeError, OSError) as e:
+        Actor.log.warning(f"  2Captcha API failed: {e}")
+    return None
+
+
+async def make_context(browser, fp: dict, proxy_setting: Optional[dict] = None):
     """Create a new context from an existing browser (one per place). Uses same fingerprint for all places to avoid captcha on second+ place."""
     Actor.log.info(
         f"  Fingerprint: Chrome/{fp['chrome_version']} | "
@@ -422,17 +505,14 @@ async def make_context(browser, fp: dict, proxy_url: Optional[str] = None):
             "Sec-Ch-Ua-Platform": fp["sec_ch_ua_platform"],
         },
     )
-    if proxy_url:
-        ctx_kwargs["proxy"] = {"server": proxy_url}
+    if proxy_setting:
+        ctx_kwargs["proxy"] = proxy_setting
 
     context = await browser.new_context(**ctx_kwargs)
 
-    await context.add_init_script("""
-        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-        Object.defineProperty(navigator, 'plugins',   { get: () => [1,2,3,4,5] });
-        Object.defineProperty(navigator, 'languages', { get: () => ['en-US','en'] });
-        window.chrome = { runtime: {} };
-    """)
+    # Apply playwright-stealth evasions (webdriver, plugins, languages, etc.)
+    stealth = Stealth()
+    await stealth.apply_stealth_async(context)
 
     return context
 
@@ -908,8 +988,8 @@ def build_pagination_url(base_url: str, offset: int) -> str:
 
 REVIEWS_PER_PAGE = 10
 
-# Change this to adjust parallel GraphQL requests (line ~829)
-PARALLEL_REQUESTS = 40
+# Parallel GraphQL requests — lower = less aggressive, fewer captchas (crawlerbros uses delays)
+PARALLEL_REQUESTS = 10
 
 # Batch size for pushing reviews to dataset (line ~830)
 PUSH_BATCH_SIZE = 50
@@ -920,7 +1000,7 @@ async def scrape_place(
     fingerprint: dict,
     place_url: str,
     max_reviews: Optional[int],
-    proxy_url: Optional[str],
+    proxy_setting: Optional[dict],
     shared_context=None,
     start_date: Optional[str] = None,
     place_idx: int = 1,
@@ -928,6 +1008,7 @@ async def scrape_place(
     captcha_wait_seconds: int = 0,
     debug_captcha: bool = False,
     try_auto_slide: bool = False,
+    captcha_solver_api_key: Optional[str] = None,
 ) -> tuple[Optional[dict], int]:
     """
     Scrape a single TripAdvisor place (hotel, restaurant, attraction).
@@ -944,7 +1025,7 @@ async def scrape_place(
     if shared_context is not None:
         context = shared_context
     else:
-        context = await make_context(browser, fingerprint, proxy_url)
+        context = await make_context(browser, fingerprint, proxy_setting)
     page = await context.new_page()
 
     # Collect GraphQL responses (CommunityUGC__locationTips, etc.)
@@ -967,19 +1048,8 @@ async def scrape_place(
 
     page.on("response", on_response)
 
-    # ── Block images/fonts to speed up load (GraphQL + DOM still work) ─
-    # Exclude captcha-delivery.com — captcha needs its images to render the slider
-    async def _block_resources(route):
-        req = route.request
-        if "captcha-delivery.com" in (req.url or "").lower():
-            await route.continue_()
-            return
-        if req.resource_type in ("image", "font", "media"):
-            await route.abort()
-        else:
-            await route.continue_()
-
-    await page.route("**/*", _block_resources)
+    # Don't block resources — DataDome detects incomplete page loads as bot behavior.
+    # Other TripAdvisor actors (crawlerbros, epctex) achieve 100% by loading pages fully.
 
     # ── Captcha listener: triggers when captcha iframe appears (any place) ─
     captcha_detected = asyncio.Event()
@@ -997,20 +1067,23 @@ async def scrape_place(
 
     try:
         # ── Phase 1: Navigate and extract first page ───────────────────────
+        # Longer timeout when using proxy — residential proxies add latency
+        nav_timeout = 90_000 if proxy_setting else 45_000
         Actor.log.info("  Navigating …")
         try:
             await with_retry(
-                lambda: page.goto(place_url, wait_until="domcontentloaded", timeout=45_000),
+                lambda: page.goto(place_url, wait_until="domcontentloaded", timeout=nav_timeout),
                 label=f"goto {place_url[:60]}",
             )
         except Exception:
             await with_retry(
-                lambda: page.goto(place_url, wait_until="load", timeout=45_000),
+                lambda: page.goto(place_url, wait_until="load", timeout=nav_timeout),
                 label=f"goto fallback {place_url[:50]}",
             )
 
-        if place_idx == 1:
-            await asyncio.sleep(random.uniform(1.5, 2.5))
+        Actor.log.info("  Place loaded successfully")
+        # Human-like pause — DataDome behavioral analysis; other actors use similar delays
+        await asyncio.sleep(random.uniform(2.0, 4.0))
 
         async def _debug_captcha_elements() -> None:
             try:
@@ -1035,7 +1108,9 @@ async def scrape_place(
         ).first
         captcha_seen = False
         captcha_task = asyncio.create_task(captcha_detected.wait())
-        page_task = asyncio.create_task(tab_locator.wait_for(state="visible", timeout=30_000))
+        page_task = asyncio.create_task(
+            tab_locator.wait_for(state="visible", timeout=60_000 if proxy_setting else 30_000)
+        )
         done, pending = await asyncio.wait(
             [captcha_task, page_task],
             return_when=asyncio.FIRST_COMPLETED,
@@ -1084,28 +1159,46 @@ async def scrape_place(
             await Actor.set_status_message("Continuing …")
 
         # Solve captcha (any place)
+        slid_ok = False
         if captcha_seen:
             await Actor.set_status_message("Captcha detected — please solve manually")
             if try_auto_slide:
                 try:
                     Actor.log.info("  Trying auto-slide (experimental — DataDome may block) …")
                     captcha_frame = page.frame_locator("iframe[src*='captcha-delivery.com']")
-                    # Wait for slider to appear (captcha loads async; don't block its images)
-                    try:
-                        await captcha_frame.locator("div.slider").first.wait_for(
-                            state="visible", timeout=8000
-                        )
-                        await asyncio.sleep(0.5)
-                    except Exception:
-                        await asyncio.sleep(2.0)
-                    # DataDome: draggable handle is div.slider (not sliderContainer/sliderTarget)
+                    # Wait for slider to appear (captcha loads async; Apify/headless can be slower)
+                    slider_ready = False
+                    for wait_sel in ['div.slider', '[class*="slider"]', '[class*="handle"]']:
+                        try:
+                            await captcha_frame.locator(wait_sel).first.wait_for(
+                                state="visible", timeout=8000
+                            )
+                            slider_ready = True
+                            await asyncio.sleep(1.0)
+                            break
+                        except Exception:
+                            continue
+                    if not slider_ready:
+                        await asyncio.sleep(3.0)  # Extra wait for slow captcha load
+                    # DataDome: draggable handle is div.slider. Never use 'button' as slider — that's Submit.
                     slid_ok = False
                     slide_attempted = False
                     max_retries = 3
+                    slider_selectors = [
+                        'div.slider',
+                        '[class*="slider"]',
+                        '[class*="handle"]',
+                        '[class*="drag"]',
+                        '[role="slider"]',
+                        '.slider-handle',
+                        '[class*="Slider"]',
+                    ]
+                    if debug_captcha:
+                        Actor.log.debug(f"  Auto-slide: trying selectors {slider_selectors}")
                     for attempt in range(1, max_retries + 1):
                         if slid_ok:
                             break
-                        for sel in ['div.slider', '[class*="handle"]', '[role="slider"]', 'button']:
+                        for sel in slider_selectors:
                             try:
                                 slider = captcha_frame.locator(sel).first
                                 if await slider.is_visible(timeout=4000):
@@ -1133,15 +1226,15 @@ async def scrape_place(
                                         # Click verify/submit button if present (DataDome: may be div or button)
                                         # Use class-based selectors (like div.slider) + text-based
                                         btn_clicked = False
-                                        for sel in [
+                                        for btn_sel in [
                                             "div[class*='submit']", "div[class*='verify']", "div[class*='btn']",
                                             "[class*='submitButton']", "[class*='verifyButton']",
                                         ]:
                                             try:
-                                                btn = captcha_frame.locator(sel).first
+                                                btn = captcha_frame.locator(btn_sel).first
                                                 if await btn.is_visible(timeout=300):
                                                     await btn.click()
-                                                    Actor.log.info(f"  Clicked verify button (selector: {sel})")
+                                                    Actor.log.info(f"  Clicked verify button (selector: {btn_sel})")
                                                     btn_clicked = True
                                                     break
                                             except Exception:
@@ -1186,37 +1279,88 @@ async def scrape_place(
                     if not slid_ok:
                         if slide_attempted:
                             Actor.log.warning(
-                                "  Auto-slide: captcha not solved — solve manually"
+                                "  Auto-slide: captcha not solved (slide may be detected as automated). "
+                                "Try running without proxy locally, or use a captcha-solving service."
                             )
                         else:
-                            Actor.log.warning("  Auto-slide: no slider found — solve manually")
+                            Actor.log.warning(
+                                "  Auto-slide: no slider element found — captcha DOM may differ on Apify. "
+                                "Enable debugCaptcha and check logs."
+                            )
                 except Exception as e:
                     Actor.log.info(f"  Auto-slide failed: {e}")
-            for frame in page.frames:
-                if frame != page.main_frame:
-                    try:
-                        loc = frame.get_by_text("Verification Required", exact=False).first
-                        if await loc.is_visible(timeout=2000):
-                            Actor.log.warning("  Waiting up to 90s for manual solve …")
-                            try:
-                                await loc.wait_for(state="detached", timeout=90_000)
-                            except Exception as e:
-                                if "detached" not in str(e).lower() and "frame" not in str(e).lower():
+
+            # 2Captcha fallback when auto-slide fails (requires proxy + API key)
+            if not slid_ok and captcha_solver_api_key and proxy_setting:
+                try:
+                    captcha_url = await page.evaluate("""
+                        () => {
+                            const iframe = document.querySelector('iframe[src*="captcha-delivery.com"]');
+                            return iframe ? iframe.src : null;
+                        }
+                    """)
+                    if captcha_url:
+                        Actor.log.info("  Trying 2Captcha DataDome solver …")
+                        cookie_str = await asyncio.to_thread(
+                            _solve_datadome_2captcha,
+                            captcha_solver_api_key,
+                            captcha_url,
+                            place_url,
+                            fingerprint["user_agent"],
+                            proxy_setting,
+                        )
+                        if cookie_str:
+                            # Parse "datadome=xxx; Path=/; ..." → extract name=value
+                            for part in cookie_str.split(";"):
+                                part = part.strip()
+                                if "=" in part and part.lower().startswith("datadome="):
+                                    name, _, value = part.partition("=")
+                                    await context.add_cookies([{
+                                        "name": name.strip(),
+                                        "value": value.strip(),
+                                        "domain": ".tripadvisor.com",
+                                        "path": "/",
+                                    }])
+                                    Actor.log.info("  2Captcha: cookie set — reloading …")
+                                    await page.reload(wait_until="domcontentloaded", timeout=60_000)
+                                    await asyncio.sleep(2.0)
                                     try:
-                                        await loc.wait_for(state="hidden", timeout=5_000)
+                                        still_visible = await page.locator("iframe[src*='captcha-delivery.com']").first.is_visible(timeout=2000)
                                     except Exception:
-                                        pass
-                            Actor.log.info("  Captcha resolved — continuing")
-                            await Actor.set_status_message("Captcha resolved — continuing")
-                            break
-                    except Exception:
-                        pass
-            try:
-                loc = page.locator("iframe[src*='captcha-delivery.com']").first
-                if await loc.is_visible(timeout=2000):
-                    await loc.wait_for(state="detached", timeout=90_000)
-            except Exception:
-                pass
+                                        still_visible = False
+                                    if not still_visible:
+                                        slid_ok = True
+                                        Actor.log.info("  2Captcha: captcha solved ✓")
+                                    break
+                except Exception as e:
+                    Actor.log.warning(f"  2Captcha fallback failed: {e}")
+
+            if not slid_ok:
+                for frame in page.frames:
+                    if frame != page.main_frame:
+                        try:
+                            loc = frame.get_by_text("Verification Required", exact=False).first
+                            if await loc.is_visible(timeout=2000):
+                                Actor.log.warning("  Waiting up to 90s for manual solve …")
+                                try:
+                                    await loc.wait_for(state="detached", timeout=90_000)
+                                except Exception as e:
+                                    if "detached" not in str(e).lower() and "frame" not in str(e).lower():
+                                        try:
+                                            await loc.wait_for(state="hidden", timeout=5_000)
+                                        except Exception:
+                                            pass
+                                Actor.log.info("  Captcha resolved — continuing")
+                                await Actor.set_status_message("Captcha resolved — continuing")
+                                break
+                        except Exception:
+                            pass
+                try:
+                    loc = page.locator("iframe[src*='captcha-delivery.com']").first
+                    if await loc.is_visible(timeout=2000):
+                        await loc.wait_for(state="detached", timeout=90_000)
+                except Exception:
+                    pass
 
         # ── Page ready (already waited above, or after captcha solve) ────────
         if not captcha_seen:
@@ -1388,7 +1532,7 @@ async def scrape_place(
                     batch = reviews[:PUSH_BATCH_SIZE]
                     reviews = reviews[PUSH_BATCH_SIZE:]
                     await _push_batch(batch)
-                await asyncio.sleep(random.uniform(0.5, 1.0))
+                await asyncio.sleep(random.uniform(0.8, 1.5))  # Human-like pacing (crawlerbros pattern)
 
         if not place_obj:
             place_obj = {"url": landed_url, "name": "", "review_count": 0}
@@ -1450,6 +1594,7 @@ async def main() -> None:
         captcha_wait: int = int(actor_input.get("captchaWaitSeconds") or 0)
         debug_captcha: bool = bool(actor_input.get("debugCaptcha"))
         try_auto_slide: bool = bool(actor_input.get("tryAutoSlide"))
+        captcha_solver_api_key: Optional[str] = (actor_input.get("captchaSolverApiKey") or "").strip() or None
         proxy_input = actor_input.get("proxyConfiguration")
 
         INTER_PLACE_DELAY = 2.0
@@ -1469,6 +1614,8 @@ async def main() -> None:
             Actor.log.info("Captcha debug: ON — will log captcha-related iframes")
         if try_auto_slide:
             Actor.log.info("Try auto-slide: ON — will attempt to auto-solve slide captcha")
+        if captcha_solver_api_key:
+            Actor.log.info("2Captcha: ON — will use as fallback when auto-slide fails")
         Actor.log.info(f"Inter-place delay: {INTER_PLACE_DELAY}s (+ 0–1s jitter)")
 
         proxy_configuration = None
@@ -1509,26 +1656,33 @@ async def main() -> None:
 
                     Actor.log.info(f"[{idx}/{len(raw_urls)}] Processing: {place_url[:70]}...")
 
-                    proxy_url: Optional[str] = None
+                    proxy_setting: Optional[dict] = None
                     if proxy_configuration:
                         loc_id = extract_location_id_from_url(place_url) or f"place_{idx}"
-                        proxy_url = await proxy_configuration.new_url(
-                            session_id=re.sub(r"[^\w]", "_", loc_id)
+                        session_id = re.sub(r"[^\w]", "_", loc_id)[:50]
+                        proxy_info = await proxy_configuration.new_proxy_info(
+                            session_id=session_id
                         )
+                        if proxy_info:
+                            proxy_setting = _proxy_info_to_playwright(proxy_info)
+                            proxy_groups = (proxy_input or {}).get("apifyProxyGroups") or []
+                            proxy_type_str = ", ".join(proxy_groups) if proxy_groups else "proxy"
+                            Actor.log.info(f"  proxy={proxy_type_str}, session={session_id}")
 
                     # Reuse one context when no proxy — keeps one window, avoids new window per place
-                    if shared_ctx is None and not proxy_url:
+                    if shared_ctx is None and not proxy_setting:
                         shared_ctx = await make_context(browser, fingerprint, None)
 
                     place_obj, pushed = await scrape_place(
-                        browser, fingerprint, place_url, max_reviews, proxy_url,
-                        shared_context=shared_ctx if not proxy_url else None,
+                        browser, fingerprint, place_url, max_reviews, proxy_setting,
+                        shared_context=shared_ctx if not proxy_setting else None,
                         start_date=start_date or None,
                         place_idx=idx,
                         total_places=len(raw_urls),
                         captcha_wait_seconds=captcha_wait,
                         debug_captcha=debug_captcha,
                         try_auto_slide=try_auto_slide,
+                        captcha_solver_api_key=captcha_solver_api_key,
                     )
 
                     if place_obj:

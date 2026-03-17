@@ -19,7 +19,9 @@
 			"title": "Start Date",
 			"type": "string",
 			"description": "Only include reviews published on or after this date (YYYY-MM-DD). Leave empty for all reviews.",
-			"default": ""
+			"default": "",
+			"editor": "datepicker",
+			"dateType": "absolute"
 		},
 		"maxReviewsPerPlace": {
 			"title": "Max Reviews per Place",
@@ -50,8 +52,17 @@
 		"tryAutoSlide": {
 			"title": "Try auto-slide captcha",
 			"type": "boolean",
-			"description": "When true, attempts to automatically solve the slide captcha by simulating a drag. Experimental — may not work with PerimeterX. Falls back to manual solve if it fails.",
+			"description": "When true, attempts to automatically solve the slide captcha by simulating a drag. Experimental — may not work with PerimeterX. Falls back to 2Captcha or manual solve if it fails.",
 			"default": false
+		},
+		"captchaSolverApiKey": {
+			"title": "2Captcha API key",
+			"type": "string",
+			"description": "Optional. When set, uses 2Captcha to solve DataDome captcha when auto-slide fails. Requires residential proxy. Get key at 2captcha.com. ~$3 per 1000 solves.",
+			"default": "",
+			"editor": "textfield",
+			"isSecret": true,
+			"nullable": true
 		},
 		"debugCaptcha": {
 			"title": "Debug captcha",
