@@ -41,6 +41,10 @@ from playwright.async_api import async_playwright, Page
 from camoufox import AsyncNewBrowser
 
 
+class CaptchaBlockedError(Exception):
+    """Raised when DataDome captcha cannot be bypassed with the current proxy."""
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  VIEWPORT RANDOMISATION
 # ══════════════════════════════════════════════════════════════════════════════
@@ -58,6 +62,33 @@ def random_fingerprint() -> dict:
         "viewport": random.choice(VIEWPORTS),
         "user_agent": "",  # populated lazily from browser after first navigation
     }
+
+
+def _build_places_md(places: list[dict]) -> str:
+    """Render a list of place dicts to a human-readable Markdown document."""
+    lines = ["# TripAdvisor Places\n"]
+    for i, p in enumerate(places, 1):
+        name = p.get("name") or p.get("title") or "Unknown"
+        url = p.get("url") or ""
+        rating = p.get("rating") or p.get("overallRating") or ""
+        review_count = p.get("reviewCount") or 0
+        address = p.get("address") or p.get("location") or ""
+        price = p.get("priceLevel") or p.get("price") or ""
+        error = p.get("error")
+        lines.append(f"## {i}. {name}\n")
+        if url:
+            lines.append(f"- **URL**: {url}")
+        if address:
+            lines.append(f"- **Address**: {address}")
+        if rating:
+            lines.append(f"- **Rating**: {rating} / 5")
+        if price:
+            lines.append(f"- **Price level**: {price}")
+        lines.append(f"- **Reviews scraped**: {review_count:,}")
+        if error:
+            lines.append(f"- **Error**: {error}")
+        lines.append("")
+    return "\n".join(lines)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -371,7 +402,7 @@ async def make_browser(playwright):
     )
     browser = await AsyncNewBrowser(
         playwright,
-        headless=False,
+        headless=True,
         os="windows",
         block_webrtc=True,
     )
@@ -667,11 +698,13 @@ async def fetch_tips_via_graphql(
 
 
 async def fetch_reviews_via_graphql(
-    page: Page, location_id: str, offset: int = 0, limit: int = 10
+    page: Page, location_id: str, offset: int = 0, limit: int = 10,
+    max_retries: int = 3,
 ) -> Optional[list]:
     """
     Fetch full hotel reviews via ReviewsProxy_getReviewListPageForLocation.
     Query ef1a9f94012220d3 (from devtools/cURL.txt).
+    Retries up to max_retries times on transient network errors.
     """
     variables = {
         "locationId": int(location_id),
@@ -688,31 +721,43 @@ async def fetch_reviews_via_graphql(
         {"variables": variables, "extensions": {"preRegisteredQueryId": REVIEWS_QUERY_ID}}
     ]
     url = "https://www.tripadvisor.com/data/graphql/ids"
-    try:
-        result = await page.evaluate(
-            """
-            async (args) => {
-                const resp = await fetch(args.url, {
-                    method: 'POST',
-                    credentials: 'include',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Accept': '*/*',
-                        'Origin': 'https://www.tripadvisor.com',
-                        'Referer': window.location.href,
-                    },
-                    body: JSON.stringify(args.payload),
-                });
-                if (!resp.ok) return null;
-                return await resp.json();
-            }
-            """,
-            {"url": url, "payload": payload},
-        )
-        return result
-    except Exception as e:
-        Actor.log.warning(f"  GraphQL reviews fetch failed: {e}")
-        return None
+    for attempt in range(1, max_retries + 1):
+        try:
+            result = await page.evaluate(
+                """
+                async (args) => {
+                    const resp = await fetch(args.url, {
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Accept': '*/*',
+                            'Origin': 'https://www.tripadvisor.com',
+                            'Referer': window.location.href,
+                        },
+                        body: JSON.stringify(args.payload),
+                    });
+                    if (!resp.ok) return null;
+                    return await resp.json();
+                }
+                """,
+                {"url": url, "payload": payload},
+            )
+            return result
+        except Exception as e:
+            if attempt < max_retries:
+                wait = 1.5 * attempt  # 1.5 s, 3.0 s
+                Actor.log.warning(
+                    f"  GraphQL fetch offset={offset} attempt {attempt}/{max_retries} failed"
+                    f" ({e}) — retrying in {wait:.1f}s"
+                )
+                await asyncio.sleep(wait)
+            else:
+                Actor.log.warning(
+                    f"  GraphQL reviews fetch failed after {max_retries} attempts"
+                    f" (offset={offset}): {e}"
+                )
+                return None
 
 
 def _extract_reviews_from_obj(obj: Any, results: list[dict]) -> None:
@@ -939,7 +984,7 @@ def build_pagination_url(base_url: str, offset: int) -> str:
 REVIEWS_PER_PAGE = 10
 
 # Parallel GraphQL requests — lower = less aggressive, fewer captchas (crawlerbros uses delays)
-PARALLEL_REQUESTS = 10
+PARALLEL_REQUESTS = 40
 
 # Batch size for pushing reviews to dataset (line ~830)
 PUSH_BATCH_SIZE = 50
@@ -970,8 +1015,6 @@ async def scrape_place(
         Actor.log.warning(f"  Invalid URL: {place_url}")
         return None, 0
 
-    await Actor.set_status_message("Loading …")
-
     if shared_context is not None:
         context = shared_context
     else:
@@ -998,8 +1041,14 @@ async def scrape_place(
 
     page.on("response", on_response)
 
-    # Don't block resources — DataDome detects incomplete page loads as bot behavior.
-    # Other TripAdvisor actors (crawlerbros, epctex) achieve 100% by loading pages fully.
+    # Block images/fonts/media — saves 2–5 s per page; GraphQL + DOM + captcha iframe unaffected.
+    # Safe with Camoufox: DataDome fingerprint check is browser-level, not network-level.
+    async def _block_resources(route):
+        if route.request.resource_type in ("image", "font", "media"):
+            await route.abort()
+        else:
+            await route.continue_()
+    await page.route("**/*", _block_resources)
 
     # ── Captcha listener: triggers when captcha iframe appears (any place) ─
     captcha_detected = asyncio.Event()
@@ -1081,7 +1130,7 @@ async def scrape_place(
                 pass
         if captcha_detected.is_set():
             captcha_seen = True
-            Actor.log.warning("  Captcha detected (listener) — handling …")
+            Actor.log.info("  Captcha detected — checking if Camoufox resolves it …")
         else:
             Actor.log.info("  Page ready — continuing")
 
@@ -1100,7 +1149,6 @@ async def scrape_place(
         # Fallback: captcha wait (first place only, when listener missed)
         if place_idx == 1 and captcha_wait_seconds > 0 and not captcha_seen:
             Actor.log.warning(f"  Waiting {captcha_wait_seconds}s for captcha — solve it now if visible")
-            await Actor.set_status_message(f"Solve captcha if visible — waiting {captcha_wait_seconds}s")
             elapsed = 0
             while elapsed < captcha_wait_seconds:
                 chunk = min(5, captcha_wait_seconds - elapsed)
@@ -1108,18 +1156,31 @@ async def scrape_place(
                 elapsed += chunk
                 if captcha_detected.is_set():
                     captcha_seen = True
-                    Actor.log.warning("  Captcha detected during wait — handling …")
+                    Actor.log.info("  Captcha detected during wait …")
                     break
                 if elapsed < captcha_wait_seconds:
                     Actor.log.info(f"  … {captcha_wait_seconds - elapsed}s remaining")
             if not captcha_seen:
                 Actor.log.info("  Captcha wait complete — continuing")
-            await Actor.set_status_message("Continuing …")
 
         # Solve captcha (any place)
+        # With Camoufox + residential proxy, DataDome often passes the fingerprint check
+        # and removes the captcha automatically within a few seconds.
+        # Wait and re-check before wasting time on auto-slide.
         slid_ok = False
         if captcha_seen:
-            await Actor.set_status_message("Captcha detected — please solve manually")
+            await asyncio.sleep(3.0)
+            try:
+                captcha_still_visible = await page.locator(
+                    "iframe[src*='captcha-delivery.com']"
+                ).first.is_visible(timeout=500)
+            except Exception:
+                captcha_still_visible = False
+            if not captcha_still_visible:
+                Actor.log.info("  Captcha auto-resolved (Camoufox passed DataDome check) ✓")
+                captcha_seen = False
+
+        if captcha_seen:
             if try_auto_slide:
                 try:
                     Actor.log.info("  Trying auto-slide (experimental — DataDome may block) …")
@@ -1237,13 +1298,12 @@ async def scrape_place(
                     if not slid_ok:
                         if slide_attempted:
                             Actor.log.warning(
-                                "  Auto-slide: captcha not solved (slide may be detected as automated). "
-                                "Try running without proxy locally, or use a captcha-solving service."
+                                "  Auto-slide: slide detected as automated — use residential proxy + Camoufox "
+                                "or a captcha-solving service."
                             )
                         else:
-                            Actor.log.warning(
-                                "  Auto-slide: no slider element found — captcha DOM may differ on Apify. "
-                                "Enable debugCaptcha and check logs."
+                            Actor.log.debug(
+                                "  Auto-slide: no slider found (captcha likely already resolved by Camoufox)"
                             )
                 except Exception as e:
                     Actor.log.info(f"  Auto-slide failed: {e}")
@@ -1294,31 +1354,19 @@ async def scrape_place(
                     Actor.log.warning(f"  2Captcha fallback failed: {e}")
 
             if not slid_ok:
-                for frame in page.frames:
-                    if frame != page.main_frame:
-                        try:
-                            loc = frame.get_by_text("Verification Required", exact=False).first
-                            if await loc.is_visible(timeout=2000):
-                                Actor.log.warning("  Waiting up to 90s for manual solve …")
-                                try:
-                                    await loc.wait_for(state="detached", timeout=90_000)
-                                except Exception as e:
-                                    if "detached" not in str(e).lower() and "frame" not in str(e).lower():
-                                        try:
-                                            await loc.wait_for(state="hidden", timeout=5_000)
-                                        except Exception:
-                                            pass
-                                Actor.log.info("  Captcha resolved — continuing")
-                                await Actor.set_status_message("Captcha resolved — continuing")
-                                break
-                        except Exception:
-                            pass
+                # Captcha still blocking — raise for proxy rotation retry instead of waiting 90s
+                still_blocking = False
                 try:
-                    loc = page.locator("iframe[src*='captcha-delivery.com']").first
-                    if await loc.is_visible(timeout=2000):
-                        await loc.wait_for(state="detached", timeout=90_000)
+                    still_blocking = await page.locator(
+                        "iframe[src*='captcha-delivery.com']"
+                    ).first.is_visible(timeout=2000)
                 except Exception:
                     pass
+                if still_blocking:
+                    Actor.log.warning(
+                        "  Captcha not resolved — signalling for proxy rotation retry"
+                    )
+                    raise CaptchaBlockedError("DataDome captcha not bypassed with current proxy")
 
         # ── Page ready (already waited above, or after captcha solve) ────────
         if not captcha_seen:
@@ -1413,12 +1461,15 @@ async def scrape_place(
                 batch_oldest = min(batch_dates) if batch_dates else ""
                 if batch_oldest and (not oldest_date or batch_oldest < oldest_date):
                     oldest_date = batch_oldest
+            cap = (min(max_reviews, page_review_count) if max_reviews and page_review_count
+                   else (max_reviews or page_review_count or 0))
+            cap_str = f"/{cap:,}" if cap else ""
             Actor.log.info(
                 f"  Pushed batch: {len(batch)} reviews | "
-                f"Place {place_idx}/{total_places} | Total: {total_pushed}"
+                f"Place {place_idx}/{total_places} | {total_pushed:,}{cap_str} reviews"
             )
             await Actor.set_status_message(
-                f"Place {place_idx}/{total_places}: {total_pushed} reviews"
+                f"Place {place_idx}/{total_places} | {total_pushed:,}{cap_str} reviews"
             )
 
         # ── Direct GraphQL fetch for reviews (parallel batches of PARALLEL_REQUESTS) ─
@@ -1521,6 +1572,9 @@ async def scrape_place(
         Actor.log.info(f"  Done: {total_pushed} reviews scraped")
         return place_obj, total_pushed
 
+    except CaptchaBlockedError:
+        raise  # propagate to caller for proxy rotation retry
+
     except Exception as exc:
         Actor.log.warning(f"  Unexpected error: {exc}")
         err_place = {"url": place_url, "name": "", "reviewCount": 0, "oldestDate": "", "error": str(exc)}
@@ -1583,17 +1637,24 @@ async def main() -> None:
             )
             Actor.log.info("Proxy configuration loaded.")
         else:
-            Actor.log.info(
-                "No proxy configured — running without proxy. "
-                "Consider enabling Apify Residential Proxies for high-volume runs."
+            Actor.log.warning(
+                "No proxy configured. On Apify Cloud, datacenter IPs are blocked by DataDome "
+                "regardless of browser fingerprint — enable Residential Proxy in the input."
             )
 
         await Actor.set_status_message(
             f"Starting — {len(raw_urls)} place(s) to process …"
         )
 
+        proxy_groups = (proxy_input or {}).get("apifyProxyGroups") or []
+        is_residential = any("RESIDENTIAL" in (g or "").upper() for g in proxy_groups)
+        # Retry (proxy rotation) only helps with residential proxies.
+        # Datacenter IPs are always blocked by DataDome — fail fast instead of wasting time.
+        MAX_CAPTCHA_RETRIES = 3 if is_residential else 1
+
         total_places = 0
         total_reviews = 0
+        all_places: list[dict] = []
 
         async with async_playwright() as pw:
             browser, fingerprint = await make_browser(pw)
@@ -1614,38 +1675,63 @@ async def main() -> None:
 
                     Actor.log.info(f"[{idx}/{len(raw_urls)}] Processing: {place_url[:70]}...")
 
-                    proxy_setting: Optional[dict] = None
-                    if proxy_configuration:
-                        loc_id = extract_location_id_from_url(place_url) or f"place_{idx}"
-                        session_id = re.sub(r"[^\w]", "_", loc_id)[:50]
-                        proxy_info = await proxy_configuration.new_proxy_info(
-                            session_id=session_id
-                        )
-                        if proxy_info:
-                            proxy_setting = _proxy_info_to_playwright(proxy_info)
-                            proxy_groups = (proxy_input or {}).get("apifyProxyGroups") or []
-                            proxy_type_str = ", ".join(proxy_groups) if proxy_groups else "proxy"
-                            Actor.log.info(f"  proxy={proxy_type_str}, session={session_id}")
+                    place_obj, pushed = None, 0
+                    loc_id_for_session = extract_location_id_from_url(place_url) or f"place_{idx}"
 
-                    # Reuse one context when no proxy — keeps one window, avoids new window per place
-                    if shared_ctx is None and not proxy_setting:
-                        shared_ctx = await make_context(browser, fingerprint, None)
+                    for captcha_attempt in range(1, MAX_CAPTCHA_RETRIES + 1):
+                        proxy_setting: Optional[dict] = None
+                        if proxy_configuration:
+                            session_id = (
+                                re.sub(r"[^\w]", "_", loc_id_for_session)[:45]
+                                + (f"_r{captcha_attempt}" if captcha_attempt > 1 else "")
+                            )
+                            proxy_info = await proxy_configuration.new_proxy_info(
+                                session_id=session_id
+                            )
+                            if proxy_info:
+                                proxy_setting = _proxy_info_to_playwright(proxy_info)
+                                proxy_type_str = ", ".join(proxy_groups) if proxy_groups else "proxy"
+                                retry_str = f" (retry {captcha_attempt}/{MAX_CAPTCHA_RETRIES})" if captcha_attempt > 1 else ""
+                                Actor.log.info(f"  proxy={proxy_type_str}, session={session_id}{retry_str}")
 
-                    place_obj, pushed = await scrape_place(
-                        browser, fingerprint, place_url, max_reviews, proxy_setting,
-                        shared_context=shared_ctx if not proxy_setting else None,
-                        start_date=start_date or None,
-                        place_idx=idx,
-                        total_places=len(raw_urls),
-                        captcha_wait_seconds=captcha_wait,
-                        debug_captcha=debug_captcha,
-                        try_auto_slide=try_auto_slide,
-                        captcha_solver_api_key=captcha_solver_api_key,
-                    )
+                        # Reuse one context when no proxy — keeps one window, avoids new window per place
+                        if shared_ctx is None and not proxy_setting:
+                            shared_ctx = await make_context(browser, fingerprint, None)
+
+                        try:
+                            place_obj, pushed = await scrape_place(
+                                browser, fingerprint, place_url, max_reviews, proxy_setting,
+                                shared_context=shared_ctx if not proxy_setting else None,
+                                start_date=start_date or None,
+                                place_idx=idx,
+                                total_places=len(raw_urls),
+                                captcha_wait_seconds=captcha_wait,
+                                debug_captcha=debug_captcha,
+                                try_auto_slide=try_auto_slide,
+                                captcha_solver_api_key=captcha_solver_api_key,
+                            )
+                            break  # success — exit retry loop
+
+                        except CaptchaBlockedError:
+                            can_retry = is_residential and captcha_attempt < MAX_CAPTCHA_RETRIES
+                            if can_retry:
+                                backoff = 3 * (2 ** (captcha_attempt - 1)) + random.uniform(0.5, 1.5)
+                                Actor.log.warning(
+                                    f"  Captcha blocked (attempt {captcha_attempt}/{MAX_CAPTCHA_RETRIES})"
+                                    f" — rotating proxy, retry in {backoff:.1f}s …"
+                                )
+                                await asyncio.sleep(backoff)
+                            else:
+                                fail_msg = (
+                                    "Blocked by DataDome captcha — Residential Proxy is required. "
+                                    "Select RESIDENTIAL under Proxy configuration in the Actor input."
+                                )
+                                Actor.log.error(f"  {fail_msg}")
+                                await Actor.fail(status_message=fail_msg)
+                                return
 
                     if place_obj:
-                        kv_key = f"place-{extract_location_id_from_url(place_url) or idx}"
-                        await Actor.set_value(kv_key, place_obj)
+                        all_places.append(place_obj)
                         total_places += 1
 
                     total_reviews += pushed
@@ -1659,6 +1745,16 @@ async def main() -> None:
                 if shared_ctx:
                     await shared_ctx.close()
                 await browser.close()
+
+        if all_places:
+            await Actor.set_value("places", all_places)
+            await Actor.set_value(
+                "places_md", _build_places_md(all_places), content_type="text/markdown"
+            )
+            Actor.log.info(
+                f"  Saved {len(all_places)} place(s) to key-value store "
+                "(keys: 'places' JSON, 'places_md' Markdown)"
+            )
 
         final_msg = (
             f"Finished — "
