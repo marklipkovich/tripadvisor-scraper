@@ -909,7 +909,7 @@ def build_pagination_url(base_url: str, offset: int) -> str:
 REVIEWS_PER_PAGE = 10
 
 # Change this to adjust parallel GraphQL requests (line ~829)
-PARALLEL_REQUESTS = 5
+PARALLEL_REQUESTS = 40
 
 # Batch size for pushing reviews to dataset (line ~830)
 PUSH_BATCH_SIZE = 50
@@ -968,8 +968,12 @@ async def scrape_place(
     page.on("response", on_response)
 
     # ── Block images/fonts to speed up load (GraphQL + DOM still work) ─
+    # Exclude captcha-delivery.com — captcha needs its images to render the slider
     async def _block_resources(route):
         req = route.request
+        if "captcha-delivery.com" in (req.url or "").lower():
+            await route.continue_()
+            return
         if req.resource_type in ("image", "font", "media"):
             await route.abort()
         else:
@@ -1085,20 +1089,26 @@ async def scrape_place(
             if try_auto_slide:
                 try:
                     Actor.log.info("  Trying auto-slide (experimental — DataDome may block) …")
-                    # Wait for captcha iframe content to render (slider loads async)
-                    await asyncio.sleep(3.0)
                     captcha_frame = page.frame_locator("iframe[src*='captcha-delivery.com']")
+                    # Wait for slider to appear (captcha loads async; don't block its images)
+                    try:
+                        await captcha_frame.locator("div.slider").first.wait_for(
+                            state="visible", timeout=8000
+                        )
+                        await asyncio.sleep(0.5)
+                    except Exception:
+                        await asyncio.sleep(2.0)
                     # DataDome: draggable handle is div.slider (not sliderContainer/sliderTarget)
                     slid_ok = False
                     slide_attempted = False
-                    max_retries = 2
+                    max_retries = 3
                     for attempt in range(1, max_retries + 1):
                         if slid_ok:
                             break
                         for sel in ['div.slider', '[class*="handle"]', '[role="slider"]', 'button']:
                             try:
                                 slider = captcha_frame.locator(sel).first
-                                if await slider.is_visible(timeout=3000):
+                                if await slider.is_visible(timeout=4000):
                                     await slider.scroll_into_view_if_needed()
                                     await asyncio.sleep(0.3)
                                     box = await slider.bounding_box()
@@ -1119,7 +1129,39 @@ async def scrape_place(
                                         Actor.log.info(
                                             f"  Auto-slide attempt {attempt}/{max_retries} (selector: {sel}) — checking …"
                                         )
-                                        await asyncio.sleep(4.0)
+                                        await asyncio.sleep(2.0)
+                                        # Click verify/submit button if present (DataDome: may be div or button)
+                                        # Use class-based selectors (like div.slider) + text-based
+                                        btn_clicked = False
+                                        for sel in [
+                                            "div[class*='submit']", "div[class*='verify']", "div[class*='btn']",
+                                            "[class*='submitButton']", "[class*='verifyButton']",
+                                        ]:
+                                            try:
+                                                btn = captcha_frame.locator(sel).first
+                                                if await btn.is_visible(timeout=300):
+                                                    await btn.click()
+                                                    Actor.log.info(f"  Clicked verify button (selector: {sel})")
+                                                    btn_clicked = True
+                                                    break
+                                            except Exception:
+                                                continue
+                                        if not btn_clicked:
+                                            for btn_text in ["Verify", "Submit", "Confirm", "Continue"]:
+                                                try:
+                                                    btn = captcha_frame.locator(
+                                                        f"button:has-text('{btn_text}'), [role='button']:has-text('{btn_text}')"
+                                                    ).first
+                                                    if await btn.is_visible(timeout=300):
+                                                        await btn.click()
+                                                        Actor.log.info(f"  Clicked '{btn_text}' button")
+                                                        btn_clicked = True
+                                                        break
+                                                except Exception:
+                                                    continue
+                                        if btn_clicked:
+                                            await asyncio.sleep(2.0)
+                                        await asyncio.sleep(2.0)
                                         # Check if captcha was solved (iframe gone or hidden)
                                         captcha_still_there = False
                                         try:
