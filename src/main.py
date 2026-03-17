@@ -967,6 +967,16 @@ async def scrape_place(
 
     page.on("response", on_response)
 
+    # ── Block images/fonts to speed up load (GraphQL + DOM still work) ─
+    async def _block_resources(route):
+        req = route.request
+        if req.resource_type in ("image", "font", "media"):
+            await route.abort()
+        else:
+            await route.continue_()
+
+    await page.route("**/*", _block_resources)
+
     # ── Captcha listener: triggers when captcha iframe appears (any place) ─
     captcha_detected = asyncio.Event()
     captcha_frame_ref: list = []  # [frame] for auto-slide
@@ -986,7 +996,7 @@ async def scrape_place(
         Actor.log.info("  Navigating …")
         try:
             await with_retry(
-                lambda: page.goto(place_url, wait_until="networkidle", timeout=60_000),
+                lambda: page.goto(place_url, wait_until="domcontentloaded", timeout=45_000),
                 label=f"goto {place_url[:60]}",
             )
         except Exception:
@@ -1076,34 +1086,68 @@ async def scrape_place(
                 try:
                     Actor.log.info("  Trying auto-slide (experimental — DataDome may block) …")
                     # Wait for captcha iframe content to render (slider loads async)
-                    await asyncio.sleep(2.5)
-                    # Use frame_locator — more reliable for cross-origin iframe
+                    await asyncio.sleep(3.0)
                     captcha_frame = page.frame_locator("iframe[src*='captcha-delivery.com']")
                     # DataDome: draggable handle is div.slider (not sliderContainer/sliderTarget)
                     slid_ok = False
-                    for sel in ['div.slider', '[class*="handle"]', '[role="slider"]', 'button']:
-                        try:
-                            slider = captcha_frame.locator(sel).first
-                            if await slider.is_visible(timeout=3000):
-                                box = await slider.bounding_box()
-                                if box and box.get("width", 0) > 0:
-                                    cx, cy = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
-                                    await page.mouse.move(cx, cy)
-                                    await asyncio.sleep(random.uniform(0.15, 0.4))
-                                    await page.mouse.down()
-                                    for i in range(1, 13):
-                                        await page.mouse.move(cx + i * 25, cy + random.uniform(-2, 2))
-                                        await asyncio.sleep(random.uniform(0.03, 0.08))
-                                    await page.mouse.up()
-                                    Actor.log.info(f"  Auto-slide attempted (selector: {sel}) — waiting 3s")
-                                    await asyncio.sleep(3.0)
-                                    slid_ok = True
-                                    break
-                        except Exception as e:
-                            Actor.log.debug(f"  Auto-slide selector {sel}: {e}")
-                            continue
+                    slide_attempted = False
+                    max_retries = 2
+                    for attempt in range(1, max_retries + 1):
+                        if slid_ok:
+                            break
+                        for sel in ['div.slider', '[class*="handle"]', '[role="slider"]', 'button']:
+                            try:
+                                slider = captcha_frame.locator(sel).first
+                                if await slider.is_visible(timeout=3000):
+                                    await slider.scroll_into_view_if_needed()
+                                    await asyncio.sleep(0.3)
+                                    box = await slider.bounding_box()
+                                    if box and box.get("width", 0) > 0:
+                                        cx, cy = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+                                        await page.mouse.move(cx, cy)
+                                        await asyncio.sleep(random.uniform(0.2, 0.5))
+                                        await page.mouse.down()
+                                        # Slower, more human-like drag (16 steps, ~320px)
+                                        for i in range(1, 17):
+                                            await page.mouse.move(
+                                                cx + i * 20 + random.uniform(-1, 1),
+                                                cy + random.uniform(-2, 2),
+                                            )
+                                            await asyncio.sleep(random.uniform(0.04, 0.1))
+                                        await page.mouse.up()
+                                        slide_attempted = True
+                                        Actor.log.info(
+                                            f"  Auto-slide attempt {attempt}/{max_retries} (selector: {sel}) — checking …"
+                                        )
+                                        await asyncio.sleep(4.0)
+                                        # Check if captcha was solved (iframe gone or hidden)
+                                        captcha_still_there = False
+                                        try:
+                                            iframe_loc = page.locator("iframe[src*='captcha-delivery.com']").first
+                                            if await iframe_loc.is_visible(timeout=500):
+                                                captcha_still_there = True
+                                        except Exception:
+                                            pass
+                                        if not captcha_still_there:
+                                            Actor.log.info("  Auto-slide: captcha solved ✓")
+                                            slid_ok = True
+                                            break
+                                        if attempt < max_retries:
+                                            Actor.log.warning(
+                                                "  Auto-slide: captcha still visible — retrying …"
+                                            )
+                                            await asyncio.sleep(2.0)
+                                        break
+                            except Exception as e:
+                                Actor.log.debug(f"  Auto-slide selector {sel}: {e}")
+                                continue
                     if not slid_ok:
-                        Actor.log.warning("  Auto-slide: no slider found — solve manually")
+                        if slide_attempted:
+                            Actor.log.warning(
+                                "  Auto-slide: captcha not solved — solve manually"
+                            )
+                        else:
+                            Actor.log.warning("  Auto-slide: no slider found — solve manually")
                 except Exception as e:
                     Actor.log.info(f"  Auto-slide failed: {e}")
             for frame in page.frames:
@@ -1177,19 +1221,14 @@ async def scrape_place(
                 if await tab.first.is_visible(timeout=2000):
                     await tab.first.click()
                     Actor.log.info(f"  Clicked '{tab_text}' tab")
-                    await asyncio.sleep(random.uniform(2.0, 3.0))
+                    await asyncio.sleep(random.uniform(0.5, 1.5))
                     break
             except Exception:
                 pass
 
-        # ── Scroll to trigger lazy-loaded content ─────────────────────────
-        for _ in range(8):
-            await page.evaluate("window.scrollBy(0, 500)")
-            await asyncio.sleep(random.uniform(1.2, 2.0))
-        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        await asyncio.sleep(random.uniform(2.5, 4.0))
-        await page.evaluate("window.scrollBy(0, -2000)")
-        await asyncio.sleep(random.uniform(1.5, 2.5))
+        # ── Minimal scroll (GraphQL fetches reviews directly; scroll was for lazy-load) ─
+        await page.evaluate("window.scrollBy(0, 400)")
+        await asyncio.sleep(random.uniform(0.5, 1.0))
 
         landed_url = page.url
         landed_title = await page.title()
