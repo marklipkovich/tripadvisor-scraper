@@ -3,7 +3,10 @@
 # You can also use any other image from Docker Hub.
 FROM apify/actor-python-playwright:3.14-1.58.0
 
-# Copy requirements and install as root (patchright needs write access to /pw-browsers)
+# Store Camoufox Firefox binary in a fixed location accessible to all users.
+ENV XDG_DATA_HOME=/opt/camoufox-data
+
+# Copy requirements and install as root (camoufox fetch needs write access)
 COPY --chown=root:root requirements.txt ./
 USER root
 RUN echo "Python version:" \
@@ -12,7 +15,8 @@ RUN echo "Python version:" \
  && pip --version \
  && echo "Installing dependencies:" \
  && pip install -r requirements.txt \
- && patchright install chromium \
+ && echo "Fetching Camoufox Firefox binary:" \
+ && python -m camoufox fetch \
  && echo "All installed Python packages:" \
  && pip freeze
 

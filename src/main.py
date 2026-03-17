@@ -15,8 +15,7 @@ Strategy (JSON-first, DOM fallback):
     • Fetches each page; can scale to thousands of reviews per place
 
 Anti-blocking stack:
-  • playwright-stealth — masks webdriver, plugins, languages, chrome
-  • Chrome fingerprint rotation — randomises UA, viewport, Sec-Ch-Ua
+  • Camoufox — stealthy Firefox fork; spoofs WebGL/canvas/audio/fonts, passes CreepJS
   • Viewport randomisation — 1366×768 / 1440×900 / 1920×1080
   • One proxy session per place — consistent IP for session
   • Exponential backoff retry — 3 attempts with 2s → 4s → 8s delays
@@ -38,26 +37,13 @@ from urllib.error import HTTPError, URLError
 
 from apify import Actor
 from crawlee.events import Event
-from patchright.async_api import async_playwright, Page
-from playwright_stealth import Stealth
+from playwright.async_api import async_playwright, Page
+from camoufox import AsyncNewBrowser
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  CHROME FINGERPRINT ROTATION
+#  VIEWPORT RANDOMISATION
 # ══════════════════════════════════════════════════════════════════════════════
-
-CHROME_VERSIONS: list[tuple[str, str]] = [
-    ("131", '"Chromium";v="131","Google Chrome";v="131","Not-A.Brand";v="24"'),
-    ("133", '"Chromium";v="133","Google Chrome";v="133","Not-A.Brand";v="24"'),
-    ("136", '"Chromium";v="136","Google Chrome";v="136","Not-A.Brand";v="24"'),
-    ("142", '"Chromium";v="142","Google Chrome";v="142","Not-A.Brand";v="24"'),
-]
-
-OS_PROFILES: list[tuple[str, str]] = [
-    ("Windows NT 10.0; Win64; x64", '"Windows"'),
-    ("Windows NT 10.0; Win64; x64", '"Windows"'),
-    ("Macintosh; Intel Mac OS X 10_15_7", '"macOS"'),
-]
 
 VIEWPORTS = [
     {"width": 1366, "height": 768},
@@ -67,19 +53,10 @@ VIEWPORTS = [
 
 
 def random_fingerprint() -> dict:
-    """Return a randomised but internally-consistent browser fingerprint."""
-    ver, sec_ch = random.choice(CHROME_VERSIONS)
-    ua_os, platform = random.choice(OS_PROFILES)
+    """Return a randomised viewport. Camoufox handles UA/fingerprint internally."""
     return {
-        "user_agent": (
-            f"Mozilla/5.0 ({ua_os}) "
-            f"AppleWebKit/537.36 (KHTML, like Gecko) "
-            f"Chrome/{ver}.0.0.0 Safari/537.36"
-        ),
-        "sec_ch_ua": sec_ch,
-        "sec_ch_ua_platform": platform,
         "viewport": random.choice(VIEWPORTS),
-        "chrome_version": ver,
+        "user_agent": "",  # populated lazily from browser after first navigation
     }
 
 
@@ -385,25 +362,18 @@ def parse_tips_from_graphql(data: list) -> list[dict]:
 #  BROWSER CONTEXT
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _browser_launch_args(fp: dict) -> list:
-    """Common launch args for Chromium."""
-    return [
-        "--disable-blink-features=AutomationControlled",
-        "--no-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-setuid-sandbox",
-        "--disable-gpu",
-        f"--user-agent={fp['user_agent']}",
-    ]
-
-
 async def make_browser(playwright):
-    """Launch Playwright Chromium once. Reuse for all places."""
+    """Launch Camoufox (stealth Firefox) once. Reuse for all places."""
     fp = random_fingerprint()
-    Actor.log.info(f"  Browser: Chrome/{fp['chrome_version']}")
-    browser = await playwright.chromium.launch(
-        headless=True,
-        args=_browser_launch_args(fp),
+    Actor.log.info(
+        f"  Browser: Camoufox (Firefox) | "
+        f"{fp['viewport']['width']}×{fp['viewport']['height']}"
+    )
+    browser = await AsyncNewBrowser(
+        playwright,
+        headless=False,
+        os="windows",
+        block_webrtc=True,
     )
     return browser, fp
 
@@ -485,35 +455,15 @@ def _solve_datadome_2captcha(
 
 
 async def make_context(browser, fp: dict, proxy_setting: Optional[dict] = None):
-    """Create a new context from an existing browser (one per place). Uses same fingerprint for all places to avoid captcha on second+ place."""
-    Actor.log.info(
-        f"  Fingerprint: Chrome/{fp['chrome_version']} | "
-        f"{fp['viewport']['width']}×{fp['viewport']['height']}"
-    )
-
+    """Create a new Playwright context. Camoufox handles all fingerprinting internally."""
     ctx_kwargs: dict = dict(
         viewport=fp["viewport"],
-        user_agent=fp["user_agent"],
         locale="en-US",
-        color_scheme="light",
-        bypass_csp=True,
-        extra_http_headers={
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Sec-Ch-Ua": fp["sec_ch_ua"],
-            "Sec-Ch-Ua-Mobile": "?0",
-            "Sec-Ch-Ua-Platform": fp["sec_ch_ua_platform"],
-        },
     )
     if proxy_setting:
         ctx_kwargs["proxy"] = proxy_setting
 
     context = await browser.new_context(**ctx_kwargs)
-
-    # Apply playwright-stealth evasions (webdriver, plugins, languages, etc.)
-    stealth = Stealth()
-    await stealth.apply_stealth_async(context)
-
     return context
 
 
@@ -1082,6 +1032,14 @@ async def scrape_place(
             )
 
         Actor.log.info("  Place loaded successfully")
+
+        # Detect real user-agent from browser (used for 2Captcha if needed)
+        if not fingerprint.get("user_agent"):
+            try:
+                fingerprint["user_agent"] = await page.evaluate("navigator.userAgent")
+            except Exception:
+                pass
+
         # Human-like pause — DataDome behavioral analysis; other actors use similar delays
         await asyncio.sleep(random.uniform(2.0, 4.0))
 
