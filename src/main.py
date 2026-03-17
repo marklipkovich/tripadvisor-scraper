@@ -1073,33 +1073,39 @@ async def scrape_place(
         if captcha_seen:
             await Actor.set_status_message("Captcha detected — please solve manually")
             if try_auto_slide:
-                if captcha_frame_ref:
-                    try:
-                        frame = captcha_frame_ref[0]
-                        Actor.log.info("  Trying auto-slide (experimental — PerimeterX may block) …")
-                        for sel in ['[class*="slide"]', '[class*="slider"]', '[class*="handle"]', '[role="slider"]', 'button']:
-                            try:
-                                slider = frame.locator(sel).first
-                                if await slider.is_visible(timeout=300):
-                                    box = await slider.bounding_box()
-                                    if box and box.get("width", 0) > 0:
-                                        cx, cy = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
-                                        await page.mouse.move(cx, cy)
-                                        await asyncio.sleep(random.uniform(0.15, 0.4))
-                                        await page.mouse.down()
-                                        for i in range(1, 13):
-                                            await page.mouse.move(cx + i * 25, cy + random.uniform(-2, 2))
-                                            await asyncio.sleep(random.uniform(0.03, 0.08))
-                                        await page.mouse.up()
-                                        Actor.log.info("  Auto-slide attempted — waiting 3s")
-                                        await asyncio.sleep(3.0)
-                                        break
-                            except Exception:
-                                continue
-                    except Exception as e:
-                        Actor.log.info(f"  Auto-slide failed: {e}")
-                else:
-                    Actor.log.info("  Auto-slide skipped (no captcha frame)")
+                try:
+                    Actor.log.info("  Trying auto-slide (experimental — DataDome may block) …")
+                    # Wait for captcha iframe content to render (slider loads async)
+                    await asyncio.sleep(2.5)
+                    # Use frame_locator — more reliable for cross-origin iframe
+                    captcha_frame = page.frame_locator("iframe[src*='captcha-delivery.com']")
+                    # DataDome: draggable handle is div.slider (not sliderContainer/sliderTarget)
+                    slid_ok = False
+                    for sel in ['div.slider', '[class*="handle"]', '[role="slider"]', 'button']:
+                        try:
+                            slider = captcha_frame.locator(sel).first
+                            if await slider.is_visible(timeout=3000):
+                                box = await slider.bounding_box()
+                                if box and box.get("width", 0) > 0:
+                                    cx, cy = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+                                    await page.mouse.move(cx, cy)
+                                    await asyncio.sleep(random.uniform(0.15, 0.4))
+                                    await page.mouse.down()
+                                    for i in range(1, 13):
+                                        await page.mouse.move(cx + i * 25, cy + random.uniform(-2, 2))
+                                        await asyncio.sleep(random.uniform(0.03, 0.08))
+                                    await page.mouse.up()
+                                    Actor.log.info(f"  Auto-slide attempted (selector: {sel}) — waiting 3s")
+                                    await asyncio.sleep(3.0)
+                                    slid_ok = True
+                                    break
+                        except Exception as e:
+                            Actor.log.debug(f"  Auto-slide selector {sel}: {e}")
+                            continue
+                    if not slid_ok:
+                        Actor.log.warning("  Auto-slide: no slider found — solve manually")
+                except Exception as e:
+                    Actor.log.info(f"  Auto-slide failed: {e}")
             for frame in page.frames:
                 if frame != page.main_frame:
                     try:
