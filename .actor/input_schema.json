@@ -34,32 +34,11 @@
 		"proxyConfiguration": {
 			"title": "Proxy Configuration",
 			"type": "object",
-			"description": "Proxy settings for anti-bot protection. Recommended for high-volume runs.",
+			"description": "Residential Proxy is required to bypass DataDome on Apify Cloud. Select RESIDENTIAL under Apify Proxy groups.",
 			"editor": "proxy",
 			"default": {
 				"useApifyProxy": false
 			}
-		},
-		"captchaWaitSeconds": {
-			"title": "Captcha wait (seconds)",
-			"type": "integer",
-			"description": "If captcha appears before scraping, set this to give time to solve it (e.g. 15–30). The actor will wait this many seconds with a message to solve captcha if visible. Use when captcha always appears but is not auto-detected.",
-			"default": 0,
-			"minimum": 0,
-			"maximum": 120,
-			"unit": "seconds"
-		},
-		"tryAutoSlide": {
-			"title": "Try auto-slide captcha",
-			"type": "boolean",
-			"description": "When true, attempts to automatically solve the slide captcha by simulating a drag. Experimental — may not work with PerimeterX. Falls back to 2Captcha or manual solve if it fails.",
-			"default": false
-		},
-		"debugCaptcha": {
-			"title": "Debug captcha",
-			"type": "boolean",
-			"description": "When true, logs captcha-related iframes (captcha-delivery.com only). Run with captcha visible to debug.",
-			"default": false
 		}
 	},
 	"required": ["startUrls"]
