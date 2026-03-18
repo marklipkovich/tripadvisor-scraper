@@ -7,38 +7,28 @@
 			"title": "Overview",
 			"transformation": {
 				"fields": [
-					"source",
-					"_type",
-					"name",
+					"placeName",
 					"rating",
-					"review_count",
 					"title",
 					"text",
-					"date",
-					"place_url"
+					"publishedDate",
+					"travelDate",
+					"tripType",
+					"lang",
+					"reviewerName",
+					"helpfulVotes",
+					"placeUrl"
 				]
 			},
 			"display": {
 				"component": "table",
 				"properties": {
-					"source": {
-						"label": "Source",
-						"format": "text"
-					},
-					"_type": {
-						"label": "Type",
-						"format": "text"
-					},
-					"name": {
-						"label": "Place Name",
+					"placeName": {
+						"label": "Place",
 						"format": "text"
 					},
 					"rating": {
 						"label": "Rating",
-						"format": "number"
-					},
-					"review_count": {
-						"label": "Review Count",
 						"format": "number"
 					},
 					"title": {
@@ -49,105 +39,73 @@
 						"label": "Review Text",
 						"format": "text"
 					},
-					"date": {
-						"label": "Date",
+					"publishedDate": {
+						"label": "Published",
+						"format": "date"
+					},
+					"travelDate": {
+						"label": "Travel Date",
 						"format": "text"
 					},
-					"place_url": {
+					"tripType": {
+						"label": "Trip Type",
+						"format": "text"
+					},
+					"lang": {
+						"label": "Language",
+						"format": "text"
+					},
+					"reviewerName": {
+						"label": "Reviewer",
+						"format": "text"
+					},
+					"helpfulVotes": {
+						"label": "Helpful",
+						"format": "number"
+					},
+					"placeUrl": {
 						"label": "Place URL",
 						"format": "link"
 					}
 				}
 			}
 		},
-		"places": {
-			"title": "Places",
+		"full": {
+			"title": "Full Details",
 			"transformation": {
 				"fields": [
-					"_type",
-					"name",
-					"url",
-					"rating",
-					"review_count",
-					"address",
-					"city",
-					"country",
-					"price_range"
-				]
-			},
-			"display": {
-				"component": "table",
-				"properties": {
-					"_type": {
-						"label": "Type",
-						"format": "text"
-					},
-					"name": {
-						"label": "Name",
-						"format": "text"
-					},
-					"url": {
-						"label": "URL",
-						"format": "link"
-					},
-					"rating": {
-						"label": "Rating",
-						"format": "number"
-					},
-					"review_count": {
-						"label": "Reviews",
-						"format": "number"
-					},
-					"address": {
-						"label": "Address",
-						"format": "text"
-					},
-					"city": {
-						"label": "City",
-						"format": "text"
-					},
-					"country": {
-						"label": "Country",
-						"format": "text"
-					},
-					"price_range": {
-						"label": "Price Range",
-						"format": "text"
-					}
-				}
-			}
-		},
-		"reviews": {
-			"title": "Reviews",
-			"transformation": {
-				"fields": [
-					"source",
-					"_type",
-					"name",
+					"id",
+					"placeName",
+					"placeUrl",
 					"title",
 					"text",
 					"rating",
-					"date",
-					"reviewer_name",
-					"helpful_votes",
-					"management_response",
-					"place_url"
+					"lang",
+					"originalLanguage",
+					"publishedDate",
+					"travelDate",
+					"tripType",
+					"helpfulVotes",
+					"reviewerName",
+					"subratings",
+					"ownerResponse",
+					"url"
 				]
 			},
 			"display": {
 				"component": "table",
 				"properties": {
-					"source": {
-						"label": "Source",
+					"id": {
+						"label": "Review ID",
 						"format": "text"
 					},
-					"_type": {
-						"label": "Type",
-						"format": "text"
-					},
-					"name": {
+					"placeName": {
 						"label": "Place",
 						"format": "text"
+					},
+					"placeUrl": {
+						"label": "Place URL",
+						"format": "link"
 					},
 					"title": {
 						"label": "Title",
@@ -161,24 +119,44 @@
 						"label": "Rating",
 						"format": "number"
 					},
-					"date": {
-						"label": "Date",
+					"lang": {
+						"label": "Language",
 						"format": "text"
 					},
-					"reviewer_name": {
-						"label": "Reviewer",
+					"originalLanguage": {
+						"label": "Original Language",
 						"format": "text"
 					},
-					"helpful_votes": {
+					"publishedDate": {
+						"label": "Published",
+						"format": "date"
+					},
+					"travelDate": {
+						"label": "Travel Date",
+						"format": "text"
+					},
+					"tripType": {
+						"label": "Trip Type",
+						"format": "text"
+					},
+					"helpfulVotes": {
 						"label": "Helpful",
 						"format": "number"
 					},
-					"management_response": {
-						"label": "Response",
+					"reviewerName": {
+						"label": "Reviewer",
 						"format": "text"
 					},
-					"place_url": {
-						"label": "Place URL",
+					"subratings": {
+						"label": "Sub-ratings",
+						"format": "array"
+					},
+					"ownerResponse": {
+						"label": "Owner Response",
+						"format": "object"
+					},
+					"url": {
+						"label": "Review URL",
 						"format": "link"
 					}
 				}

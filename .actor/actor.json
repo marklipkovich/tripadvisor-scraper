@@ -3,12 +3,16 @@
 	"actorSpecification": 1,
 	"name": "tripadvisor",
 	"title": "TripAdvisor Reviews Scraper",
-	"description": "Scrapes reviews from TripAdvisor places (hotels, restaurants, attractions). Uses JSON-LD and DOM extraction with anti-blocking protection. Supports pagination beyond 200 reviews.",
+	"description": "Scrapes reviews from TripAdvisor places (hotels, restaurants, attractions). Supports filtering by date range, rating and language. Uses Camoufox stealth browser with anti-blocking protection.",
 	"version": "1.0",
 	"buildTag": "latest",
 	"meta": {
 		"templateId": "python-playwright",
-		"generatedBy": "Cursor with Claude"
+		"generatedBy": "Cursor with claude-4.6-sonnet-medium-thinking"
+	},
+	"dockerConfig": {
+		"memoryMbytes": 2048,
+		"timeoutSecs": 1200
 	},
 	"input": "./input_schema.json",
 	"output": "./output_schema.json",

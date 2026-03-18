@@ -6,14 +6,20 @@
 		"dataset": {
 			"type": "string",
 			"title": "Reviews",
-			"description": "Reviews in the default dataset",
+			"description": "All scraped reviews in the default dataset",
 			"template": "{{links.apiDefaultDatasetUrl}}/items"
 		},
-		"keyValueStore": {
+		"Places.json": {
 			"type": "string",
-			"title": "Places",
-			"description": "Place metadata (reviewCount, oldestDate, error) in key-value store",
-			"template": "{{links.apiDefaultKeyValueStoreUrl}}/keys"
+			"title": "Places (JSON)",
+			"description": "Place metadata with rating distribution, review count and oldest date",
+			"template": "{{links.apiDefaultKeyValueStoreUrl}}/records/Places.json"
+		},
+		"Places.md": {
+			"type": "string",
+			"title": "Places (Markdown)",
+			"description": "Human-readable summary of all scraped places",
+			"template": "{{links.apiDefaultKeyValueStoreUrl}}/records/Places.md"
 		}
 	}
 }

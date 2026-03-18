@@ -60,27 +60,79 @@ def random_fingerprint() -> dict:
     }
 
 
+def _normalize_place(raw: dict, url: str = "", loc_id: str = "") -> dict:
+    """Return a place dict with a fixed, complete set of fields (no missing keys)."""
+    return {
+        "id":                raw.get("id") or loc_id or "",
+        "url":               raw.get("url") or url or "",
+        "name":              raw.get("name") or "",
+        "place_type":        raw.get("place_type") or "",
+        "rating":            raw.get("rating") or None,
+        "totalReviews":      raw.get("review_count") or raw.get("totalReviews") or 0,
+        "scrapedReviews":    raw.get("scrapedReviews") or raw.get("reviewCount") or 0,
+        "address":           raw.get("address") or "",
+        "city":              raw.get("city") or "",
+        "region":            raw.get("region") or "",
+        "country":           raw.get("country") or "",
+        "price_range":       raw.get("price_range") or "",
+        "image":             raw.get("image") or "",
+        "ratingDistribution": raw.get("ratingDistribution") or None,
+        "oldestDate":        raw.get("oldestDate") or "",
+        "error":             raw.get("error"),
+    }
+
+
 def _build_places_md(places: list[dict]) -> str:
     """Render a list of place dicts to a human-readable Markdown document."""
     lines = ["# TripAdvisor Places\n"]
     for i, p in enumerate(places, 1):
-        name = p.get("name") or p.get("title") or "Unknown"
-        url = p.get("url") or ""
-        rating = p.get("rating") or p.get("overallRating") or ""
-        review_count = p.get("reviewCount") or 0
-        address = p.get("address") or p.get("location") or ""
-        price = p.get("priceLevel") or p.get("price") or ""
-        error = p.get("error")
+        name       = p.get("name") or "Unknown"
+        pid        = p.get("id") or ""
+        url        = p.get("url") or ""
+        place_type = p.get("place_type") or ""
+        rating     = p.get("rating") or ""
+        total      = p.get("totalReviews") or 0
+        scraped    = p.get("scrapedReviews") or 0
+        address    = p.get("address") or ""
+        city       = p.get("city") or ""
+        region     = p.get("region") or ""
+        country    = p.get("country") or ""
+        price      = p.get("price_range") or ""
+        image      = p.get("image") or ""
+        oldest     = p.get("oldestDate") or ""
+        dist       = p.get("ratingDistribution") or {}
+        error      = p.get("error")
+
         lines.append(f"## {i}. {name}\n")
+        if pid:
+            lines.append(f"- **ID**: {pid}")
         if url:
             lines.append(f"- **URL**: {url}")
-        if address:
-            lines.append(f"- **Address**: {address}")
+        if place_type:
+            lines.append(f"- **Type**: {place_type}")
         if rating:
             lines.append(f"- **Rating**: {rating} / 5")
+        location_parts = ", ".join(filter(None, [address, city, region, country]))
+        if location_parts:
+            lines.append(f"- **Location**: {location_parts}")
         if price:
             lines.append(f"- **Price level**: {price}")
-        lines.append(f"- **Reviews scraped**: {review_count:,}")
+        if image:
+            lines.append(f"- **Image**: {image}")
+        if total:
+            lines.append(f"- **Total reviews on TripAdvisor**: {total:,}")
+        lines.append(f"- **Reviews scraped**: {scraped:,}")
+        if oldest:
+            lines.append(f"- **Oldest scraped review**: {oldest}")
+        if dist:
+            lines.append(
+                f"- **Rating distribution**: "
+                f"Excellent {dist.get('excellent', '?')}, "
+                f"Very Good {dist.get('good', '?')}, "
+                f"Average {dist.get('average', '?')}, "
+                f"Poor {dist.get('poor', '?')}, "
+                f"Terrible {dist.get('terrible', '?')}"
+            )
         if error:
             lines.append(f"- **Error**: {error}")
         lines.append("")
@@ -452,6 +504,56 @@ EXTRACT_PAGE_SCRIPT = """
         }
     }
 
+    // 3a. Rating distribution — search __NEXT_DATA__ for several known shapes
+    try {
+        const ndEl = document.getElementById('__NEXT_DATA__');
+        if (ndEl) {
+            function _toRatingDist(obj) {
+                if (!obj || typeof obj !== 'object') return null;
+                // Shape A: {1:n,2:n,3:n,4:n,5:n}
+                if (['1','2','3','4','5'].every(k => typeof obj[k] === 'number')) {
+                    return { excellent: obj['5'], good: obj['4'], average: obj['3'], poor: obj['2'], terrible: obj['1'] };
+                }
+                // Shape B: {EXCELLENT:n,VERY_GOOD:n,AVERAGE:n,POOR:n,TERRIBLE:n}
+                if (typeof obj['EXCELLENT'] === 'number') {
+                    return { excellent: obj['EXCELLENT'], good: obj['VERY_GOOD']||obj['GOOD']||0, average: obj['AVERAGE']||0, poor: obj['POOR']||0, terrible: obj['TERRIBLE']||0 };
+                }
+                // Shape C: [{ratingValue:5,count:n}, ...]
+                if (Array.isArray(obj) && obj.length >= 5 && typeof obj[0].count === 'number') {
+                    const m = {};
+                    obj.forEach(e => { m[String(e.ratingValue||e.rating||e.value)] = e.count; });
+                    if (['1','2','3','4','5'].every(k => typeof m[k] === 'number')) {
+                        return { excellent: m['5'], good: m['4'], average: m['3'], poor: m['2'], terrible: m['1'] };
+                    }
+                }
+                return null;
+            }
+            function _findRatingCounts(obj, depth) {
+                if (!obj || typeof obj !== 'object' || depth > 10) return null;
+                const d = _toRatingDist(obj);
+                if (d) return d;
+                const keys = Object.keys(obj);
+                // Prioritise keys that suggest rating data
+                const prio = ['ratingCounts','reviewRatingCounts','distribution','ratingDistribution','subRatings','histogram'];
+                for (const k of prio) {
+                    if (obj[k]) { const r = _findRatingCounts(obj[k], depth + 1); if (r) return r; }
+                }
+                for (const k of keys.slice(0, 60)) {
+                    if (prio.includes(k)) continue;
+                    const r = _findRatingCounts(obj[k], depth + 1);
+                    if (r) return r;
+                }
+                return null;
+            }
+            const nd = JSON.parse(ndEl.textContent);
+            const dist = _findRatingCounts(nd, 0);
+            if (dist) {
+                if (!result.place) result.place = {};
+                result.place.ratingDistribution = dist;
+            }
+        }
+    } catch (_) {}
+
     // 3. DOM reviews (data-reviewid, data-test-target, data-automation)
     let reviewBlocks = document.querySelectorAll('[data-reviewid]');
     if (reviewBlocks.length === 0) {
@@ -555,15 +657,23 @@ REVIEWS_QUERY_ID = "ef1a9f94012220d3"  # ReviewsProxy_getReviewListPageForLocati
 async def fetch_reviews_via_graphql(
     page: Page, location_id: str, offset: int = 0, limit: int = 10,
     max_retries: int = 3,
+    rating_filters: Optional[list] = None,
+    language_filter: Optional[str] = None,
 ) -> Optional[list]:
     """
     Fetch full hotel reviews via ReviewsProxy_getReviewListPageForLocation.
     Query ef1a9f94012220d3 (from devtools/cURL.txt).
     Retries up to max_retries times on transient network errors.
     """
+    gql_filters = []
+    if rating_filters:
+        gql_filters.append({"axis": "RATING", "selections": [str(r) for r in rating_filters]})
+    if language_filter:
+        gql_filters.append({"axis": "LANGUAGE", "selections": [language_filter]})
+
     variables = {
         "locationId": int(location_id),
-        "filters": [],  # No language filter = all languages (was ["en"] only, missing ~10–15% of reviews)
+        "filters": gql_filters,
         "limit": limit,
         "offset": offset,
         "sortType": None,
@@ -745,6 +855,7 @@ def parse_reviews_from_graphql(data: list) -> list[dict]:
                     travel_date = stay_date[:7]
                 else:
                     travel_date = str(date_val)[:7] if date_val else ""
+                trip_type = (trip_info.get("tripType") or trip_info.get("type") or "") if isinstance(trip_info, dict) else ""
                 contrib = user.get("contributionCounts") or {} if isinstance(user, dict) else {}
                 mgmt = r.get("mgmtResponse") or {}
                 owner_resp = None
@@ -779,24 +890,35 @@ def parse_reviews_from_graphql(data: list) -> list[dict]:
                                     "id": str(ph.get("id") or ""),
                                     "image": url_tpl.replace("{width}", "640").replace("{height}", "480"),
                                 })
+                place_name = loc.get("name") or "" if isinstance(loc, dict) else ""
+                place_web_url = (
+                    "https://www.tripadvisor.com" + str(loc.get("url") or "")
+                ) if isinstance(loc, dict) and loc.get("url") else ""
                 place_info = {
                     "id": str(loc.get("locationId") or r.get("locationId") or ""),
-                    "name": loc.get("name") or "",
-                    "webUrl": "https://www.tripadvisor.com" + str(loc.get("url") or ""),
+                    "name": place_name,
+                    "webUrl": place_web_url,
                 } if isinstance(loc, dict) else {}
                 results.append({
                     "id": rid,
                     "url": review_url,
                     "title": (r.get("title") or "").strip(),
+                    "text": (text or "").strip() if isinstance(text, str) else str(text).strip(),
+                    "rating": int(rating) if rating is not None else None,
                     "lang": r.get("language") or "en",
                     "originalLanguage": r.get("originalLanguage") or r.get("language") or "en",
-                    "locationId": str(loc.get("locationId") or r.get("locationId") or ""),
                     "publishedDate": str(date_val)[:50] if date_val else "",
-                    "publishedPlatform": r.get("publishPlatform"),
-                    "rating": int(rating) if rating is not None else None,
-                    "helpfulVotes": int(r.get("helpfulVotes") or r.get("helpful_votes") or 0),
                     "travelDate": travel_date,
-                    "text": (text or "").strip() if isinstance(text, str) else str(text).strip(),
+                    "tripType": trip_type,
+                    "helpfulVotes": int(r.get("helpfulVotes") or r.get("helpful_votes") or 0),
+                    "reviewerName": name,
+                    "placeName": place_name,
+                    "placeUrl": place_web_url,
+                    "publishedPlatform": r.get("publishPlatform"),
+                    "locationId": str(loc.get("locationId") or r.get("locationId") or ""),
+                    "subratings": subratings,
+                    "ownerResponse": owner_resp,
+                    "photos": photos_list,
                     "user": {
                         "userId": user.get("id") or "",
                         "displayName": name,
@@ -804,9 +926,6 @@ def parse_reviews_from_graphql(data: list) -> list[dict]:
                         "avatar": _safe_avatar_url(user),
                         "contributions": contrib,
                     } if isinstance(user, dict) else {},
-                    "ownerResponse": owner_resp,
-                    "subratings": subratings,
-                    "photos": photos_list,
                     "placeInfo": place_info,
                     "date": str(date_val)[:50] if date_val else "",
                 })
@@ -835,6 +954,9 @@ async def scrape_place(
     proxy_setting: Optional[dict],
     shared_context=None,
     start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    rating_filters: Optional[list] = None,
+    language_filter: Optional[str] = None,
     place_idx: int = 1,
     total_places: int = 1,
 ) -> tuple[Optional[dict], int]:
@@ -847,6 +969,7 @@ async def scrape_place(
     if not place_url:
         Actor.log.warning(f"  Invalid URL: {place_url}")
         return None, 0
+    loc_id = extract_location_id_from_url(place_url) or ""
 
     if shared_context is not None:
         context = shared_context
@@ -1034,9 +1157,10 @@ async def scrape_place(
         total_pushed = 0
         oldest_date = ""
         start_ts = (start_date.strip()[:10] if start_date and start_date.strip() else "") or ""
+        end_ts = (end_date.strip()[:10] if end_date and end_date.strip() else "") or ""
         # Cap at TripAdvisor's reported count to avoid API returning extra/padded items
         page_review_count = (
-            place_obj.get("review_count") or place_obj.get("reviewCount") or 0
+            place_obj.get("review_count") or place_obj.get("totalReviews") or 0
         ) if place_obj else 0
 
         async def _push_batch(batch: list[dict]) -> None:
@@ -1069,7 +1193,7 @@ async def scrape_place(
             )
 
         # ── Direct GraphQL fetch for reviews (parallel batches of PARALLEL_REQUESTS) ─
-        loc_id = extract_location_id_from_url(landed_url)
+        loc_id = extract_location_id_from_url(landed_url) or loc_id
         if loc_id:
             reviews_per_page = 10
             reviews_offset = 0
@@ -1088,7 +1212,11 @@ async def scrape_place(
                 if not batch_offsets:
                     break
                 tasks = [
-                    fetch_reviews_via_graphql(page, loc_id, offset=o, limit=reviews_per_page)
+                    fetch_reviews_via_graphql(
+                        page, loc_id, offset=o, limit=reviews_per_page,
+                        rating_filters=rating_filters,
+                        language_filter=language_filter,
+                    )
                     for o in batch_offsets
                 ]
                 batch_results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -1112,7 +1240,10 @@ async def scrape_place(
                             t["place_url"] = landed_url
                             place_name = (place_obj.get("name", "") if place_obj else "") or (t.get("placeInfo") or {}).get("name", "")
                             t["name"] = place_name
-                            if start_ts and ((t.get("date") or t.get("publishedDate") or "")[:10] or "9999") < start_ts:
+                            review_date = (t.get("date") or t.get("publishedDate") or "")[:10]
+                            if start_ts and (review_date or "9999") < start_ts:
+                                continue
+                            if end_ts and review_date and review_date > end_ts:
                                 continue
                             reviews.append(t)
                     if len(extracted) < reviews_per_page:
@@ -1140,7 +1271,7 @@ async def scrape_place(
                 await asyncio.sleep(random.uniform(0.8, 1.5))  # Human-like pacing (crawlerbros pattern)
 
         if not place_obj:
-            place_obj = {"url": landed_url, "name": "", "review_count": 0}
+            place_obj = {}
         if not place_obj.get("name") and reviews:
             place_obj["name"] = (reviews[0].get("placeInfo") or {}).get("name", "") or ""
 
@@ -1159,11 +1290,10 @@ async def scrape_place(
                 "Try enabling Apify Residential Proxy."
             )
 
-        if place_obj:
-            place_obj["id"] = place_obj.get("id") or loc_id or ""
-            place_obj["reviewCount"] = total_pushed
-            place_obj["oldestDate"] = oldest_date
-            place_obj["error"] = None
+        # Normalise to a consistent schema regardless of extraction success/failure
+        place_obj = _normalize_place(place_obj, url=landed_url, loc_id=loc_id)
+        place_obj["scrapedReviews"] = total_pushed
+        place_obj["oldestDate"] = oldest_date
 
         Actor.log.info(f"  Done: {total_pushed} reviews scraped")
         return place_obj, total_pushed
@@ -1173,7 +1303,7 @@ async def scrape_place(
 
     except Exception as exc:
         Actor.log.warning(f"  Unexpected error: {exc}")
-        err_place = {"url": place_url, "name": "", "reviewCount": 0, "oldestDate": "", "error": str(exc)}
+        err_place = _normalize_place({"url": place_url, "error": str(exc)}, url=place_url, loc_id=loc_id or "")
         return err_place, 0
 
     finally:
@@ -1198,20 +1328,59 @@ async def main() -> None:
 
         raw_urls = actor_input.get("startUrls") or actor_input.get("start_urls") or []
         max_reviews: Optional[int] = actor_input.get("maxReviewsPerPlace")
-        start_date: Optional[str] = actor_input.get("startDate") or ""
+        start_date: str = (actor_input.get("startDate") or "").strip()[:10]
+        end_date: str = (actor_input.get("endDate") or "").strip()[:10]
+        rating_filters: list = [str(r) for r in (actor_input.get("reviewRatings") or [])]
+        language_filter: str = (actor_input.get("language") or "").strip()
         proxy_input = actor_input.get("proxyConfiguration")
 
         INTER_PLACE_DELAY = 2.0
 
         if not raw_urls:
-            Actor.log.warning("Input field 'startUrls' is empty — nothing to scrape.")
-            await Actor.set_status_message("No URLs provided. Add place URLs to the input.")
+            fail_msg = "Input field 'startUrls' is empty — add at least one TripAdvisor place URL."
+            Actor.log.error(fail_msg)
+            await Actor.fail(status_message=fail_msg)
+            return
+
+        # ── Validate all URLs before starting the browser ──────────────────
+        invalid_urls = []
+        for entry in raw_urls:
+            url = entry.get("url") if isinstance(entry, dict) else entry
+            if not url:
+                continue
+            if not normalize_place_url(str(url)):
+                invalid_urls.append(str(url))
+        if invalid_urls:
+            fail_msg = (
+                "Invalid URL(s) detected — all Place URLs must be TripAdvisor place pages "
+                "(e.g. https://www.tripadvisor.com/Hotel_Review-...). "
+                f"Invalid: {', '.join(invalid_urls[:3])}"
+                + (" …" if len(invalid_urls) > 3 else "")
+            )
+            Actor.log.error(fail_msg)
+            await Actor.fail(status_message=fail_msg)
+            return
+
+        # ── Validate date range ─────────────────────────────────────────────
+        if start_date and end_date and start_date > end_date:
+            fail_msg = (
+                f"Start Date ({start_date}) must be on or before End Date ({end_date}). "
+                "Please correct the date range in the input."
+            )
+            Actor.log.error(fail_msg)
+            await Actor.fail(status_message=fail_msg)
             return
 
         Actor.log.info(f"Places to scrape: {len(raw_urls)}")
         Actor.log.info(f"Max reviews/place: {max_reviews or 'unlimited'}")
         if start_date:
             Actor.log.info(f"Start date filter: {start_date}")
+        if end_date:
+            Actor.log.info(f"End date filter: {end_date}")
+        if rating_filters:
+            Actor.log.info(f"Rating filter: {', '.join(rating_filters)} stars")
+        if language_filter:
+            Actor.log.info(f"Language filter: {language_filter}")
         Actor.log.info(f"Inter-place delay: {INTER_PLACE_DELAY}s (+ 0–1s jitter)")
 
         proxy_configuration = None
@@ -1290,6 +1459,9 @@ async def main() -> None:
                                 browser, fingerprint, place_url, max_reviews, proxy_setting,
                                 shared_context=shared_ctx if not proxy_setting else None,
                                 start_date=start_date or None,
+                                end_date=end_date or None,
+                                rating_filters=rating_filters or None,
+                                language_filter=language_filter or None,
                                 place_idx=idx,
                                 total_places=len(raw_urls),
                             )
@@ -1337,13 +1509,13 @@ async def main() -> None:
                 await browser.close()
 
         if all_places:
-            await Actor.set_value("places", all_places)
+            await Actor.set_value("Places.json", all_places)
             await Actor.set_value(
-                "places_md", _build_places_md(all_places), content_type="text/markdown"
+                "Places.md", _build_places_md(all_places), content_type="text/markdown"
             )
             Actor.log.info(
                 f"  Saved {len(all_places)} place(s) to key-value store "
-                "(keys: 'places' JSON, 'places_md' Markdown)"
+                "(keys: 'Places.json', 'Places.md')"
             )
 
         final_msg = (
