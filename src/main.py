@@ -1051,15 +1051,29 @@ async def scrape_place(
             [captcha_task, page_task],
             return_when=asyncio.FIRST_COMPLETED,
         )
+        # Cancel the losing task and retrieve its exception to avoid
+        # "Task exception was never retrieved" warnings at process exit.
         for t in pending:
             t.cancel()
             try:
                 await t
             except (asyncio.CancelledError, Exception):
                 pass
+        # Also retrieve exception from the winning task if it failed (e.g. page_task
+        # timed out because navigation landed on the wrong page — homepage redirect).
+        page_task_failed = False
+        if page_task in done:
+            exc = page_task.exception() if not page_task.cancelled() else None
+            if exc is not None:
+                page_task_failed = True
+                Actor.log.warning(f"  Page tab not found (page may have redirected): {exc!s:.120}")
+
         if captcha_detected.is_set():
             captcha_seen = True
             Actor.log.info("  Captcha detected — checking if Camoufox resolves it …")
+        elif page_task_failed:
+            # Navigation landed on wrong page — treat as a retriable proxy error
+            raise CaptchaBlockedError("Page did not load correctly (tab selector timed out — possible redirect)")
         else:
             Actor.log.info("  Page ready — continuing")
 
@@ -1070,11 +1084,11 @@ async def scrape_place(
                     captcha_seen = True
                     break
 
-        # Poll every second for up to 8s — gives Camoufox time to pass DataDome check.
-        # Some proxy IPs need slightly longer; exit early as soon as the iframe disappears.
+        # Poll every second for up to 12s — gives Camoufox time to pass DataDome check.
+        # Some proxy IPs need slightly longer; exits early as soon as the iframe disappears.
         if captcha_seen:
             captcha_resolved = False
-            for _ in range(8):
+            for _ in range(12):
                 await asyncio.sleep(1.0)
                 try:
                     still_here = await page.locator(
@@ -1090,7 +1104,7 @@ async def scrape_place(
                 captcha_seen = False
                 captcha_was_resolved = True
             else:
-                Actor.log.warning("  Captcha not resolved after 8s — signalling for proxy rotation retry")
+                Actor.log.warning("  Captcha not resolved after 12s — signalling for proxy rotation retry")
                 raise CaptchaBlockedError("DataDome captcha not bypassed with current proxy")
 
         # ── Page ready ───────────────────────────────────────────────────────
