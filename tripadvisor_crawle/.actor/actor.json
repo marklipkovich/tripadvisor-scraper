@@ -1,0 +1,24 @@
+{
+	"$schema": "https://apify.com/schemas/v1/actor.ide.json",
+	"actorSpecification": 1,
+	"name": "tripadvisor-crawlee",
+	"title": "TripAdvisor Reviews Scraper (Crawlee Edition)",
+	"description": "Crawlee + Camoufox version for comparison with raw Playwright implementation. Uses PlaywrightCrawler with CamoufoxPlugin for browser management.",
+	"version": "1.0",
+	"buildTag": "latest",
+    "usesStandbyMode": false,
+	"meta": {
+		"templateId": "python-playwright",
+		"generatedBy": "Cursor with claude-4.6-sonnet-medium-thinking"
+	},
+	"dockerConfig": {
+		"memoryMbytes": 2048,
+		"timeoutSecs": 1200
+	},
+	"input": "./input_schema.json",
+	"output": "./output_schema.json",
+	"storages": {
+		"dataset": "./dataset_schema.json"
+	},
+	"dockerfile": "Dockerfile"
+}

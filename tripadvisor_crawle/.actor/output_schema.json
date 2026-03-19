@@ -1,0 +1,25 @@
+{
+	"$schema": "https://apify.com/schemas/v1/output.ide.json",
+	"actorOutputSchemaVersion": 1,
+	"title": "TripAdvisor Reviews Scraper Output",
+	"properties": {
+		"dataset": {
+			"type": "string",
+			"title": "Reviews",
+			"description": "All scraped reviews in the default dataset",
+			"template": "{{links.apiDefaultDatasetUrl}}/items"
+		},
+		"Places.json": {
+			"type": "string",
+			"title": "Places (JSON)",
+			"description": "Place metadata with rating distribution, review count and oldest date",
+			"template": "{{links.apiDefaultKeyValueStoreUrl}}/records/Places.json"
+		},
+		"Places.md": {
+			"type": "string",
+			"title": "Places (Markdown)",
+			"description": "Human-readable summary of all scraped places",
+			"template": "{{links.apiDefaultKeyValueStoreUrl}}/records/Places.md"
+		}
+	}
+}

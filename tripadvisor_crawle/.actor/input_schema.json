@@ -1,0 +1,74 @@
+{
+	"$schema": "https://apify.com/schemas/v1/input.ide.json",
+	"title": "TripAdvisor Reviews Scraper Input",
+	"type": "object",
+	"schemaVersion": 1,
+	"properties": {
+		"startUrls": {
+			"title": "Place URLs",
+			"type": "array",
+			"description": "TripAdvisor place URLs to scrape reviews from (hotels, restaurants, attractions). Must start with https://www.tripadvisor.com/",
+			"editor": "requestListSources",
+			"prefill": [
+				{
+					"url": "https://www.tripadvisor.com/Hotel_Review-g190327-d264936-Reviews-1926_Hotel_Spa-Sliema_Island_of_Malta.html"
+				}
+			]
+		},
+		"maxReviewsPerPlace": {
+			"title": "Max Reviews per Place",
+			"type": "integer",
+			"description": "Maximum number of reviews to scrape per place (0 = unlimited)",
+			"default": 0,
+			"minimum": 0,
+			"unit": "reviews"
+		},
+		"startDate": {
+			"title": "Start Date",
+			"type": "string",
+			"description": "Only include reviews published on or after this date (YYYY-MM-DD). Leave empty for all reviews.",
+			"default": "",
+			"editor": "datepicker",
+			"dateType": "absolute"
+		},
+		"endDate": {
+			"title": "End Date",
+			"type": "string",
+			"description": "Only include reviews published on or before this date (YYYY-MM-DD). Leave empty for all reviews.",
+			"default": "",
+			"editor": "datepicker",
+			"dateType": "absolute"
+		},
+		"reviewRatings": {
+			"title": "Review Ratings",
+			"type": "array",
+			"description": "Only include reviews with the selected star ratings. Leave empty to include all ratings.",
+			"editor": "select",
+			"default": [],
+			"items": {
+				"type": "string",
+				"enum": ["5", "4", "3", "2", "1"],
+				"enumTitles": ["5 ★ — Excellent", "4 ★ — Very Good", "3 ★ — Average", "2 ★ — Poor", "1 ★ — Terrible"]
+			}
+		},
+		"language": {
+			"title": "Review Language",
+			"type": "string",
+			"description": "Only include reviews written in this language. Leave empty for all languages.",
+			"editor": "select",
+			"default": "",
+			"enum": ["", "en", "de", "fr", "es", "it", "pt", "ru", "nl", "ja", "zh", "ko", "ar", "pl", "sv", "da", "fi", "nb", "tr", "cs", "hu"],
+			"enumTitles": ["All languages", "English", "German", "French", "Spanish", "Italian", "Portuguese", "Russian", "Dutch", "Japanese", "Chinese", "Korean", "Arabic", "Polish", "Swedish", "Danish", "Finnish", "Norwegian", "Turkish", "Czech", "Hungarian"]
+		},
+		"proxyConfiguration": {
+			"title": "Proxy Configuration",
+			"type": "object",
+			"description": "Residential Proxy is required to bypass DataDome on Apify Cloud. Select RESIDENTIAL under Apify Proxy groups.",
+			"editor": "proxy",
+			"default": {
+				"useApifyProxy": false
+			}
+		}
+	},
+	"required": ["startUrls"]
+}

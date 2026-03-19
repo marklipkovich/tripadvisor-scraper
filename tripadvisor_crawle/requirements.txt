@@ -1,0 +1,8 @@
+# Feel free to add your Python dependencies below. For formatting guidelines, see:
+# https://pip.pypa.io/en/latest/reference/requirements-file-format/
+
+apify ~= 3.3.0
+camoufox == 0.4.11
+crawlee[playwright] ~= 1.5.0
+#typing-extensions >= 4.0.0
+typing-extensions ~= 4.15.0

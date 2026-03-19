@@ -1,0 +1,166 @@
+{
+	"$schema": "https://apify.com/schemas/v1/dataset.ide.json",
+	"actorSpecification": 1,
+	"fields": {},
+	"views": {
+		"overview": {
+			"title": "Overview",
+			"transformation": {
+				"fields": [
+					"placeName",
+					"rating",
+					"title",
+					"text",
+					"publishedDate",
+					"travelDate",
+					"tripType",
+					"lang",
+					"reviewerName",
+					"helpfulVotes",
+					"placeUrl"
+				]
+			},
+			"display": {
+				"component": "table",
+				"properties": {
+					"placeName": {
+						"label": "Place",
+						"format": "text"
+					},
+					"rating": {
+						"label": "Rating",
+						"format": "number"
+					},
+					"title": {
+						"label": "Review Title",
+						"format": "text"
+					},
+					"text": {
+						"label": "Review Text",
+						"format": "text"
+					},
+					"publishedDate": {
+						"label": "Published",
+						"format": "date"
+					},
+					"travelDate": {
+						"label": "Travel Date",
+						"format": "text"
+					},
+					"tripType": {
+						"label": "Trip Type",
+						"format": "text"
+					},
+					"lang": {
+						"label": "Language",
+						"format": "text"
+					},
+					"reviewerName": {
+						"label": "Reviewer",
+						"format": "text"
+					},
+					"helpfulVotes": {
+						"label": "Helpful",
+						"format": "number"
+					},
+					"placeUrl": {
+						"label": "Place URL",
+						"format": "link"
+					}
+				}
+			}
+		},
+		"full": {
+			"title": "Full Details",
+			"transformation": {
+				"fields": [
+					"id",
+					"placeName",
+					"placeUrl",
+					"title",
+					"text",
+					"rating",
+					"lang",
+					"originalLanguage",
+					"publishedDate",
+					"travelDate",
+					"tripType",
+					"helpfulVotes",
+					"reviewerName",
+					"subratings",
+					"ownerResponse",
+					"url"
+				]
+			},
+			"display": {
+				"component": "table",
+				"properties": {
+					"id": {
+						"label": "Review ID",
+						"format": "text"
+					},
+					"placeName": {
+						"label": "Place",
+						"format": "text"
+					},
+					"placeUrl": {
+						"label": "Place URL",
+						"format": "link"
+					},
+					"title": {
+						"label": "Title",
+						"format": "text"
+					},
+					"text": {
+						"label": "Review",
+						"format": "text"
+					},
+					"rating": {
+						"label": "Rating",
+						"format": "number"
+					},
+					"lang": {
+						"label": "Language",
+						"format": "text"
+					},
+					"originalLanguage": {
+						"label": "Original Language",
+						"format": "text"
+					},
+					"publishedDate": {
+						"label": "Published",
+						"format": "date"
+					},
+					"travelDate": {
+						"label": "Travel Date",
+						"format": "text"
+					},
+					"tripType": {
+						"label": "Trip Type",
+						"format": "text"
+					},
+					"helpfulVotes": {
+						"label": "Helpful",
+						"format": "number"
+					},
+					"reviewerName": {
+						"label": "Reviewer",
+						"format": "text"
+					},
+					"subratings": {
+						"label": "Sub-ratings",
+						"format": "array"
+					},
+					"ownerResponse": {
+						"label": "Owner Response",
+						"format": "object"
+					},
+					"url": {
+						"label": "Review URL",
+						"format": "link"
+					}
+				}
+			}
+		}
+	}
+}
