@@ -471,7 +471,7 @@ async def make_context(browser, fp: dict, proxy_setting: Optional[dict] = None):
 #  PAGE EXTRACTION (DOM + embedded JSON)
 # ══════════════════════════════════════════════════════════════════════════════
 
-EXTRACT_PAGE_SCRIPT = """
+EXTRACT_PAGE_SCRIPT = r"""
 () => {
     const result = { place: null, reviews: [] };
 

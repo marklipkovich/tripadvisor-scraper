@@ -6,6 +6,7 @@
 	"description": "Scrapes reviews from TripAdvisor places (hotels, restaurants, attractions). Supports filtering by date range, rating and language. Uses Camoufox stealth browser with anti-blocking protection.",
 	"version": "1.0",
 	"buildTag": "latest",
+    "usesStandbyMode": false,
 	"meta": {
 		"templateId": "python-playwright",
 		"generatedBy": "Cursor with claude-4.6-sonnet-medium-thinking"
