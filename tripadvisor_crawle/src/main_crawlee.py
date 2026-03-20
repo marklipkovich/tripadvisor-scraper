@@ -35,6 +35,8 @@ from datetime import timedelta
 from typing import Any, Optional
 from urllib.parse import urlparse
 
+import httpx  # type: ignore[import-untyped]  # transitive dep of crawlee
+
 from apify import Actor
 from camoufox import AsyncNewBrowser
 from crawlee import ConcurrencySettings, Request
@@ -92,12 +94,28 @@ class CamoufoxPlugin(PlaywrightBrowserPlugin):
 
     def __init__(self, timezone: str = _DEFAULT_TIMEZONE, **kwargs: Any) -> None:
         # timezone_id is a Playwright *context* option, not a browser-launch option.
-        # Inject it into browser_new_context_options so Crawlee passes it to every
-        # new_context() call — this makes window.Intl report the proxy country's timezone.
-        ctx_opts = dict(kwargs.pop("browser_new_context_options", None) or {})
-        ctx_opts["timezone_id"] = timezone
-        super().__init__(browser_new_context_options=ctx_opts, **kwargs)
+        # We store _ctx_opts as an instance attribute so update_timezone() can mutate
+        # it in-place — PlaywrightBrowserPlugin stores the same dict reference, so the
+        # change takes effect on the very next new_context() call (before each place).
+        self._ctx_opts: dict = dict(kwargs.pop("browser_new_context_options", None) or {})
+        self._ctx_opts["timezone_id"] = timezone
+        super().__init__(browser_new_context_options=self._ctx_opts, **kwargs)
         self._timezone = timezone
+
+    def update_timezone(self, timezone: str) -> None:
+        """
+        Update the timezone for the next browser context created by Crawlee.
+        Called from _get_proxy_url() after detecting the proxy exit IP's timezone,
+        before Crawlee creates the context for that request.
+        Mutates _ctx_opts in-place — the parent plugin holds the same dict reference.
+        """
+        self._timezone = timezone
+        self._ctx_opts["timezone_id"] = timezone
+        # Safety: also update the parent's copy in case it was stored separately.
+        for attr in ("_browser_new_context_options", "browser_new_context_options"):
+            stored = getattr(self, attr, None)
+            if isinstance(stored, dict) and stored is not self._ctx_opts:
+                stored["timezone_id"] = timezone
 
     @override
     async def new_browser(self) -> PlaywrightBrowserController:
@@ -1101,6 +1119,54 @@ async def scrape_place(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  PROXY TIMEZONE PROBE
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def _probe_proxy_timezone(proxy_url: str) -> tuple[str, str]:
+    """
+    Detect the proxy's exit IP and return (IANA_timezone, source_label).
+
+    source_label is a short string for log display, e.g.:
+        "Europe/London [ipinfo: 82.45.x.x/GB]"
+        "America/New_York [ip-api: 1.2.3.4/US]"
+        "Europe/London [probe-failed: default]"
+
+    Tries two services in order so that a block on one doesn't fail the run:
+      1. ipinfo.io  — HTTPS, proxy-friendly, free 50 k req/month
+      2. ip-api.com — HTTP fallback, very permissive, widely reachable
+
+    Falls back to _DEFAULT_TIMEZONE on any error.
+    httpx is already available as a crawlee transitive dependency.
+    """
+    _ENDPOINTS = [
+        # (url, service_name, ip_key, country_key, tz_key)
+        ("https://ipinfo.io/json",                                    "ipinfo",  "ip",    "country",     "timezone"),
+        ("http://ip-api.com/json/?fields=query,countryCode,timezone", "ip-api",  "query", "countryCode", "timezone"),
+    ]
+    last_exc: Exception | None = None
+    for url, svc, ip_key, country_key, tz_key in _ENDPOINTS:
+        try:
+            async with httpx.AsyncClient(proxy=proxy_url, timeout=15.0) as client:
+                resp = await client.get(url)
+                data = resp.json()
+            exit_ip  = data.get(ip_key,      "?")
+            country  = data.get(country_key, "?")
+            timezone = data.get(tz_key)      or _DEFAULT_TIMEZONE
+            source   = f"{svc}: {exit_ip}/{country}"
+            Actor.log.info(f"  Proxy exit IP: {exit_ip} | country={country} | timezone={timezone} ({svc})")
+            return timezone, source
+        except Exception as exc:
+            last_exc = exc
+            Actor.log.debug(f"  Timezone probe via {url} failed: {exc} — trying next …")
+
+    Actor.log.warning(
+        f"  All proxy IP probes failed ({last_exc}) — "
+        f"falling back to default timezone: {_DEFAULT_TIMEZONE}"
+    )
+    return _DEFAULT_TIMEZONE, "probe-failed: default"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  ACTOR ENTRY POINT  (Crawlee edition)
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1174,14 +1240,15 @@ async def main() -> None:
         proxy_groups = (proxy_input or {}).get("apifyProxyGroups") or []
         is_residential = any("RESIDENTIAL" in (g or "").upper() for g in proxy_groups)
 
-        # Resolve the browser timezone from the selected proxy country so the IP
-        # geolocation and JS Intl.DateTimeFormat timezone match — a key DataDome signal.
         proxy_country = ((proxy_input or {}).get("apifyProxyCountry") or "").strip().upper()
-        tz_candidates = COUNTRY_TIMEZONES.get(proxy_country, [_DEFAULT_TIMEZONE])
-        browser_timezone = random.choice(tz_candidates)
-        Actor.log.info(
-            f"Proxy country: {proxy_country or '(not set)'} → browser timezone: {browser_timezone}"
-        )
+        # browser_timezone is the default/static value; per-session detection happens
+        # inside _get_proxy_url so every place and every retry gets the right timezone.
+        browser_timezone = _DEFAULT_TIMEZONE
+
+        # Cache: session_id → (timezone, source_label).
+        # source_label is shown in logs so it's always clear where the timezone came from
+        # (ipinfo probe, ip-api fallback, static country mapping, or default).
+        _session_tz_cache: dict[str, tuple[str, str]] = {}
 
         if proxy_input:
             apify_proxy_config = await Actor.create_proxy_configuration(
@@ -1205,13 +1272,34 @@ async def main() -> None:
                             loc_id = m.group(1)
                             retry = getattr(request, "retry_count", 0) or 0
                             effective_session = loc_id if retry == 0 else f"{loc_id}_r{retry + 1}"
-                            Actor.log.debug(
-                                f"  Proxy session: {effective_session} "
-                                f"(loc={loc_id}, retry={retry})"
-                            )
                     info = await _apify_proxy.new_proxy_info(session_id=effective_session)
                     if info:
-                        return f"{info.scheme}://{info.username}:{info.password}@{info.hostname}:{info.port}"
+                        proxy_url = (
+                            f"{info.scheme}://{info.username}:"
+                            f"{info.password}@{info.hostname}:{info.port}"
+                        )
+                        # ── Per-session timezone detection ────────────────────────────
+                        # Each session can map to a different country's IP, so we probe
+                        # once per session and cache the result.  When a country is
+                        # explicitly selected in the input the static mapping is used
+                        # (no HTTP request needed — all IPs are from the same country).
+                        if effective_session not in _session_tz_cache:
+                            if proxy_country and proxy_country in COUNTRY_TIMEZONES:
+                                tz = random.choice(COUNTRY_TIMEZONES[proxy_country])
+                                _session_tz_cache[effective_session] = (
+                                    tz, f"mapping:{proxy_country}"
+                                )
+                            else:
+                                tz, src = await _probe_proxy_timezone(proxy_url)
+                                _session_tz_cache[effective_session] = (tz, src)
+                            # Push the detected timezone into the plugin so Crawlee's
+                            # next new_context() call uses it.  This must happen before
+                            # PlaywrightBrowserPlugin creates the context (it does so
+                            # immediately after _get_proxy_url returns).
+                            camoufox_plugin.update_timezone(
+                                _session_tz_cache[effective_session][0]
+                            )
+                        return proxy_url
                     return None
 
                 crawlee_proxy_config = CrawleeProxyConfiguration(new_url_function=_get_proxy_url)
@@ -1225,6 +1313,20 @@ async def main() -> None:
                 "No proxy configured. On Apify Cloud, datacenter IPs are blocked by DataDome "
                 "regardless of browser fingerprint — enable Residential Proxy in the input."
             )
+
+        # ── Initial browser timezone (used before first proxy session is probed) ─
+        if proxy_country and proxy_country in COUNTRY_TIMEZONES:
+            browser_timezone = random.choice(COUNTRY_TIMEZONES[proxy_country])
+            Actor.log.info(
+                f"Proxy country: {proxy_country} → browser timezone: {browser_timezone} "
+                f"(static mapping, applied to every session)"
+            )
+        elif apify_proxy_config is not None:
+            Actor.log.info(
+                "Proxy country not set — timezone will be auto-detected per session via ipinfo.io"
+            )
+        else:
+            Actor.log.info(f"No proxy — browser timezone: {browser_timezone} (default)")
 
         # max_request_retries = N means: 1 initial attempt + N retries = N+1 total attempts.
         # total_attempts is used for display ("attempt X/Y") and exhaustion checks.
@@ -1249,11 +1351,16 @@ async def main() -> None:
                     place_urls.append(norm)
 
         # ── Crawlee PlaywrightCrawler with CamoufoxPlugin ────────────────────
+        # camoufox_plugin is created as a named variable so _get_proxy_url() can call
+        # camoufox_plugin.update_timezone() before each context is created — giving
+        # every place and every retry the correct timezone for its actual proxy IP.
+        camoufox_plugin = CamoufoxPlugin(timezone=browser_timezone)
+
         # proxy_configuration is Crawlee's own ProxyConfiguration backed by Apify's
         # resolver. Crawlee calls new_url_function() per-request and injects the proxy
         # URL at browser.new_context() time — Firefox/Camoufox supports this fully.
         crawler = PlaywrightCrawler(
-            browser_pool=BrowserPool(plugins=[CamoufoxPlugin(timezone=browser_timezone)]),
+            browser_pool=BrowserPool(plugins=[camoufox_plugin]),
             proxy_configuration=crawlee_proxy_config,
             # Crawlee retries the request when scrape_place() raises CaptchaBlockedError.
             max_request_retries=max_retries,
@@ -1287,8 +1394,22 @@ async def main() -> None:
 
             proxy_groups_str = ", ".join(proxy_groups) if proxy_groups else "NONE"
             attempt_str = f" (attempt {attempt}/{total_attempts})" if total_attempts > 1 else ""
+            # Compute the session ID that _get_proxy_url uses for this request (same logic).
+            _m = re.search(r"-d(\d+)-", place_url)
+            _loc = _m.group(1) if _m else f"place_{current_seq}"
+            _retry = context.request.retry_count
+            session_display = _loc if _retry == 0 else f"{_loc}_r{_retry + 1}"
+            # _session_tz_cache is populated by _get_proxy_url before handle_place runs.
+            # Unpack (timezone, source_label) — source makes it clear in logs whether
+            # the timezone came from ipinfo, ip-api, a static country mapping, or default.
+            _tz_entry = _session_tz_cache.get(session_display)
+            session_tz  = _tz_entry[0] if _tz_entry else browser_timezone
+            session_src = _tz_entry[1] if _tz_entry else "browser-default"
             Actor.log.info(f"[{current_seq}/{len(place_urls)}] Processing: {place_url[:70]}...")
-            Actor.log.info(f"  proxy={proxy_groups_str}{attempt_str}")
+            Actor.log.info(
+                f"  proxy={proxy_groups_str} | session={session_display} | "
+                f"tz={session_tz} [{session_src}]{attempt_str}"
+            )
 
             if attempt > 1:
                 # Exponential backoff: 3 s, 6 s, 12 s … with ±1 s jitter
