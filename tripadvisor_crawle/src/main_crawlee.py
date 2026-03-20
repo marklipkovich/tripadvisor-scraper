@@ -608,7 +608,7 @@ def parse_review_from_graphql(data: list) -> list[dict]:
 # ══════════════════════════════════════════════════════════════════════════════
 
 PARALLEL_REQUESTS = 40
-PUSH_BATCH_SIZE = 50
+PUSH_BATCH_SIZE = 100
 
 
 REVIEWS_QUERY_ID = "ef1a9f94012220d3"  # ReviewsProxy_getReviewListPageForLocation
@@ -785,7 +785,7 @@ async def scrape_place(
 
     Actor.log.info("  Place loaded successfully")
     await Actor.set_status_message(f"Place {place_idx}/{total_places} — Waiting for Reviews tab …")
-    await asyncio.sleep(random.uniform(2.0, 4.0))
+    await asyncio.sleep(random.uniform(1.0, 2.0))
 
     tab_locator = page.get_by_role("tab", name=re.compile(r"Reviews?|Overview", re.I)).or_(
         page.locator('a:has-text("Reviews"), a:has-text("Overview")')
@@ -967,10 +967,13 @@ async def scrape_place(
                 )
                 for off in batch_offsets
             ]
-            batch_results = await asyncio.gather(*tasks)
+            batch_results = await asyncio.gather(*tasks, return_exceptions=True)
             got_any = False
             got_partial = False
             for i, extracted in enumerate(batch_results):
+                if isinstance(extracted, Exception):
+                    Actor.log.warning(f"  GraphQL fetch offset={batch_offsets[i]} failed: {extracted}")
+                    continue
                 if extracted:
                     got_any = True
                     for t in extracted:
@@ -1144,6 +1147,8 @@ async def main() -> None:
         # Shared state accumulated across all place requests
         all_places: list[dict] = []
         total_reviews_counter = [0]  # list so closure can mutate
+        seq_counter = [0]            # increments once per unique URL (retries reuse same number)
+        url_seq: dict[str, int] = {} # url → sequential processing-order number
         place_urls = []
         for entry in raw_urls:
             url = entry.get("url") if isinstance(entry, dict) else entry
@@ -1172,44 +1177,71 @@ async def main() -> None:
             ignore_http_error_status_codes=[403, 429, 503],
             # Default 60 s is too short for scraping a full place — raise to 20 min.
             request_handler_timeout=timedelta(seconds=1200),
+            # Default Crawlee navigation timeout is 60 s. Residential proxy adds
+            # latency; 120 s prevents wasting a retry slot on a slow first load.
+            navigation_timeout=timedelta(seconds=120),
         )
 
         @crawler.router.default_handler
         async def handle_place(context: PlaywrightCrawlingContext) -> None:
             place_url = context.request.url
-            place_idx = context.request.user_data.get("place_idx", 1)
             attempt   = context.request.retry_count + 1
 
-            # Crawlee already injected the proxy into the browser context via
-            # crawlee_proxy_config.new_url_function() — nothing to do here.
+            # Assign a stable sequential number to each unique URL so logs always
+            # show 1/N, 2/N, 3/N regardless of Crawlee's retry reordering.
+            if place_url not in url_seq:
+                seq_counter[0] += 1
+                url_seq[place_url] = seq_counter[0]
+            current_seq = url_seq[place_url]
+
             proxy_groups_str = ", ".join(proxy_groups) if proxy_groups else "NONE"
             attempt_str = f" (attempt {attempt}/{max_retries})" if max_retries > 1 else ""
-            Actor.log.info(f"[{place_idx}/{len(place_urls)}] Processing: {place_url[:70]}...")
+            Actor.log.info(f"[{current_seq}/{len(place_urls)}] Processing: {place_url[:70]}...")
             Actor.log.info(f"  proxy={proxy_groups_str}{attempt_str}")
-            # Note: Crawlee re-queues failed requests to the back of the queue, so
-            # places appear out of order when retries occur (e.g. 1, 3, 2 when 2 was
-            # captcha-blocked on attempt 1). This is expected Crawlee behaviour.
+
             if attempt > 1:
+                # Exponential backoff: 3 s, 6 s, 12 s … with ±1 s jitter
+                backoff = 3.0 * (2 ** (attempt - 2)) + random.uniform(0.5, 1.5)
+                Actor.log.info(f"  Backoff {backoff:.1f}s before retry attempt {attempt}/{max_retries} …")
+                await asyncio.sleep(backoff)
                 await Actor.set_status_message(
-                    f"Place {place_idx}/{len(place_urls)} — Retrying (attempt {attempt}/{max_retries}) …"
+                    f"Place {current_seq}/{len(place_urls)} — Retrying (attempt {attempt}/{max_retries}) …"
                 )
             else:
-                await Actor.set_status_message(f"Place {place_idx}/{len(place_urls)} — Loading …")
+                await Actor.set_status_message(f"Place {current_seq}/{len(place_urls)} — Loading …")
 
-            place_obj, pushed = await scrape_place(
-                context.page, place_url, max_reviews,
-                has_proxy=crawlee_proxy_config is not None,
-                start_date=start_date or None,
-                end_date=end_date or None,
-                rating_filters=rating_filters or None,
-                language_filter=language_filter or None,
-                place_idx=place_idx,
-                total_places=len(place_urls),
-            )
+            try:
+                place_obj, pushed = await scrape_place(
+                    context.page, place_url, max_reviews,
+                    has_proxy=crawlee_proxy_config is not None,
+                    start_date=start_date or None,
+                    end_date=end_date or None,
+                    rating_filters=rating_filters or None,
+                    language_filter=language_filter or None,
+                    place_idx=current_seq,
+                    total_places=len(place_urls),
+                )
+            except CaptchaBlockedError:
+                if attempt >= max_retries:
+                    err_msg = (
+                        f"Place {current_seq}/{len(place_urls)} blocked by DataDome after "
+                        f"{max_retries} attempt(s) — IP pool may be temporarily flagged. "
+                        "This place will be skipped."
+                    )
+                    Actor.log.error(f"  {err_msg}")
+                    await Actor.set_status_message(
+                        f"Place {current_seq}/{len(place_urls)} — CAPTCHA FAILED, skipping"
+                    )
+                raise  # always re-raise so Crawlee can retry or mark failed
 
             if place_obj:
                 all_places.append(place_obj)
             total_reviews_counter[0] += pushed
+
+            # Brief inter-place delay to avoid hammering the server
+            delay = 2.0 + random.uniform(0.0, 1.0)
+            Actor.log.info(f"  Inter-place delay: {delay:.1f}s …")
+            await asyncio.sleep(delay)
 
         # Build request list with place_idx metadata
         requests = [
@@ -1228,6 +1260,16 @@ async def main() -> None:
                 f"  Saved {len(all_places)} place(s) to key-value store "
                 "(keys: 'Places.json', 'Places.md')"
             )
+
+        if total_reviews_counter[0] == 0 and place_urls:
+            fail_msg = (
+                f"Failed — 0 reviews scraped for {len(place_urls)} place(s). "
+                "All requests were blocked or timed out. "
+                "Check your proxy configuration and retry."
+            )
+            Actor.log.error(fail_msg)
+            await Actor.fail(status_message=fail_msg)
+            return
 
         final_msg = (
             f"Finished — {len(all_places)} place(s) and "
