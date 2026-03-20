@@ -51,6 +51,30 @@ VIEWPORTS = [
     {"width": 1920, "height": 1080},
 ]
 
+# Maps Apify proxy country codes to a list of plausible IANA timezones for that country.
+# One is picked randomly per browser launch so retries look like different machines in the
+# same country.  Single-timezone countries (GB, DE…) always resolve to the same value.
+COUNTRY_TIMEZONES: dict[str, list[str]] = {
+    "US": ["America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles"],
+    "GB": ["Europe/London"],
+    "CA": ["America/Toronto", "America/Vancouver", "America/Edmonton"],
+    "AU": ["Australia/Sydney", "Australia/Melbourne", "Australia/Brisbane"],
+    "DE": ["Europe/Berlin"],
+    "FR": ["Europe/Paris"],
+    "NL": ["Europe/Amsterdam"],
+    "IE": ["Europe/Dublin"],
+    "IT": ["Europe/Rome"],
+    "ES": ["Europe/Madrid"],
+    "PL": ["Europe/Warsaw"],
+    "SE": ["Europe/Stockholm"],
+    "IN": ["Asia/Kolkata"],
+    "JP": ["Asia/Tokyo"],
+    "SG": ["Asia/Singapore"],
+    "BR": ["America/Sao_Paulo", "America/Manaus"],
+}
+# Fallback when no proxy country is configured (e.g. local dev without proxy).
+_DEFAULT_TIMEZONE = "Europe/London"
+
 
 def random_fingerprint() -> dict:
     """Return a randomised viewport. Camoufox handles UA/fingerprint internally."""
@@ -428,18 +452,24 @@ def parse_tips_from_graphql(data: list) -> list[dict]:
 #  BROWSER CONTEXT
 # ══════════════════════════════════════════════════════════════════════════════
 
-async def make_browser(playwright):
+async def make_browser(playwright, timezone: str = _DEFAULT_TIMEZONE):
     """Launch Camoufox (stealth Firefox) once. Reuse for all places."""
     fp = random_fingerprint()
+    chosen_os = random.choice(["windows", "macos"])
     Actor.log.info(
         f"  Browser: Camoufox (Firefox) | "
-        f"{fp['viewport']['width']}×{fp['viewport']['height']}"
+        f"{fp['viewport']['width']}×{fp['viewport']['height']} | "
+        f"os={chosen_os} | tz={timezone}"
     )
     browser = await AsyncNewBrowser(
         playwright,
         headless=True,
-        os="windows",
+        os=chosen_os,
         block_webrtc=True,
+        locale="en-US",
+        # Simulates natural mouse movement curves and micro-pauses — helps pass
+        # DataDome's behavioural analysis without changing anything we scrape.
+        humanize=True,
     )
     return browser, fp
 
@@ -454,11 +484,16 @@ def _proxy_info_to_playwright(proxy_info) -> dict:
 
 
 
-async def make_context(browser, fp: dict, proxy_setting: Optional[dict] = None):
+async def make_context(
+    browser, fp: dict, proxy_setting: Optional[dict] = None, timezone: str = _DEFAULT_TIMEZONE
+):
     """Create a new Playwright context. Camoufox handles all fingerprinting internally."""
     ctx_kwargs: dict = dict(
         viewport=fp["viewport"],
         locale="en-US",
+        # Match timezone to proxy country — Playwright injects this into window.Intl,
+        # making the JS-visible timezone consistent with the proxy IP geolocation.
+        timezone_id=timezone,
     )
     if proxy_setting:
         ctx_kwargs["proxy"] = proxy_setting
@@ -471,7 +506,7 @@ async def make_context(browser, fp: dict, proxy_setting: Optional[dict] = None):
 #  PAGE EXTRACTION (DOM + embedded JSON)
 # ══════════════════════════════════════════════════════════════════════════════
 
-EXTRACT_PAGE_SCRIPT = r"""
+EXTRACT_PAGE_SCRIPT = """
 () => {
     const result = { place: null, reviews: [] };
 
@@ -959,6 +994,7 @@ async def scrape_place(
     language_filter: Optional[str] = None,
     place_idx: int = 1,
     total_places: int = 1,
+    timezone: str = _DEFAULT_TIMEZONE,
 ) -> tuple[Optional[dict], int]:
     """
     Scrape a single TripAdvisor place (hotel, restaurant, attraction).
@@ -974,7 +1010,7 @@ async def scrape_place(
     if shared_context is not None:
         context = shared_context
     else:
-        context = await make_context(browser, fingerprint, proxy_setting)
+        context = await make_context(browser, fingerprint, proxy_setting, timezone=timezone)
     page = await context.new_page()
 
     # Collect GraphQL responses (CommunityUGC__locationTips, etc.)
@@ -1419,12 +1455,21 @@ async def main() -> None:
         # Datacenter IPs are always blocked by DataDome — fail fast instead of wasting time.
         MAX_CAPTCHA_RETRIES = 3 if is_residential else 1
 
+        # Resolve browser timezone from the selected proxy country so the IP geolocation
+        # and JS Intl.DateTimeFormat().resolvedOptions().timeZone match — a key DataDome signal.
+        proxy_country = ((proxy_input or {}).get("apifyProxyCountry") or "").strip().upper()
+        tz_candidates = COUNTRY_TIMEZONES.get(proxy_country, [_DEFAULT_TIMEZONE])
+        browser_timezone = random.choice(tz_candidates)
+        Actor.log.info(
+            f"Proxy country: {proxy_country or '(not set)'} → browser timezone: {browser_timezone}"
+        )
+
         total_places = 0
         total_reviews = 0
         all_places: list[dict] = []
 
         async with async_playwright() as pw:
-            browser, fingerprint = await make_browser(pw)
+            browser, fingerprint = await make_browser(pw, timezone=browser_timezone)
             shared_ctx = None
             try:
                 for idx, entry in enumerate(raw_urls, 1):
@@ -1466,7 +1511,7 @@ async def main() -> None:
 
                         # Reuse one context when no proxy — keeps one window, avoids new window per place
                         if shared_ctx is None and not proxy_setting:
-                            shared_ctx = await make_context(browser, fingerprint, None)
+                            shared_ctx = await make_context(browser, fingerprint, None, timezone=browser_timezone)
 
                         try:
                             place_obj, pushed = await scrape_place(
@@ -1478,6 +1523,7 @@ async def main() -> None:
                                 language_filter=language_filter or None,
                                 place_idx=idx,
                                 total_places=len(raw_urls),
+                                timezone=browser_timezone,
                             )
                             break  # success — exit retry loop
 

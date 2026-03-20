@@ -46,6 +46,35 @@ from playwright.async_api import Page
 from typing_extensions import override
 
 
+# Set to True to run the browser headless locally (e.g. when debugging without a GUI).
+# On Apify Cloud this is always forced to True regardless of this value.
+FORCE_HEADLESS = True
+
+# Maps Apify proxy country codes to a list of plausible IANA timezones for that country.
+# One timezone is picked randomly per browser launch so each retry looks like a slightly
+# different machine while still matching the proxy's geolocation.
+COUNTRY_TIMEZONES: dict[str, list[str]] = {
+    "US": ["America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles"],
+    "GB": ["Europe/London"],
+    "CA": ["America/Toronto", "America/Vancouver", "America/Edmonton"],
+    "AU": ["Australia/Sydney", "Australia/Melbourne", "Australia/Brisbane"],
+    "DE": ["Europe/Berlin"],
+    "FR": ["Europe/Paris"],
+    "NL": ["Europe/Amsterdam"],
+    "IE": ["Europe/Dublin"],
+    "IT": ["Europe/Rome"],
+    "ES": ["Europe/Madrid"],
+    "PL": ["Europe/Warsaw"],
+    "SE": ["Europe/Stockholm"],
+    "IN": ["Asia/Kolkata"],
+    "JP": ["Asia/Tokyo"],
+    "SG": ["Asia/Singapore"],
+    "BR": ["America/Sao_Paulo", "America/Manaus"],
+}
+# Fallback when the proxy country is unknown or not configured.
+_DEFAULT_TIMEZONE = "Europe/London"
+
+
 class CaptchaBlockedError(Exception):
     """Raised when DataDome captcha cannot be bypassed with the current proxy."""
 
@@ -61,12 +90,21 @@ class CamoufoxPlugin(PlaywrightBrowserPlugin):
     (context creation, proxy injection, page lifecycle) is inherited unchanged.
     """
 
+    def __init__(self, timezone: str = _DEFAULT_TIMEZONE, **kwargs: Any) -> None:
+        # timezone_id is a Playwright *context* option, not a browser-launch option.
+        # Inject it into browser_new_context_options so Crawlee passes it to every
+        # new_context() call — this makes window.Intl report the proxy country's timezone.
+        ctx_opts = dict(kwargs.pop("browser_new_context_options", None) or {})
+        ctx_opts["timezone_id"] = timezone
+        super().__init__(browser_new_context_options=ctx_opts, **kwargs)
+        self._timezone = timezone
+
     @override
     async def new_browser(self) -> PlaywrightBrowserController:
         if not self._playwright:
             raise RuntimeError("Playwright browser plugin is not initialized.")
         vp = random.choice(VIEWPORTS)
-        Actor.log.info(f"  Browser: Camoufox (Firefox) | {vp['width']}×{vp['height']}")
+        Actor.log.info(f"  Browser: Camoufox (Firefox) | {vp['width']}×{vp['height']} | tz={self._timezone}")
         # Start with Camoufox-specific defaults, then let Crawlee's options override.
         # Rotate OS fingerprint per browser instance so consecutive retries look like
         # different machines.  "linux" is deliberately excluded — it is far less common
@@ -76,8 +114,9 @@ class CamoufoxPlugin(PlaywrightBrowserPlugin):
         launch_options: dict = {
             "os": chosen_os,
             "block_webrtc": True,
-            # locale="en-US" matches make_context() in main.py so TripAdvisor's GraphQL
-            # API receives Accept-Language: en-US and returns a parseable list response.
+            # locale="en-US" keeps TripAdvisor's GraphQL returning English results.
+            # We keep this fixed regardless of proxy country — a UK user browsing in
+            # English is completely natural on TripAdvisor.
             "locale": "en-US",
             # Simulates natural mouse movement curves and micro-pauses — helps pass
             # DataDome's behavioural analysis without changing anything we scrape.
@@ -85,9 +124,9 @@ class CamoufoxPlugin(PlaywrightBrowserPlugin):
             **self._browser_launch_options,
         }
         # Put headless AFTER the spread so our value takes precedence over Crawlee's
-        # internal default. Set to True on Apify Cloud, False for local debugging.
+        # internal default. Always True on Apify Cloud; locally controlled by FORCE_HEADLESS.
         import os as _os
-        launch_options["headless"] = _os.environ.get("APIFY_IS_AT_HOME") == "1"
+        launch_options["headless"] = _os.environ.get("APIFY_IS_AT_HOME") == "1" or FORCE_HEADLESS
         return PlaywrightBrowserController(
             browser=await AsyncNewBrowser(self._playwright, **launch_options),
             # One page per Camoufox instance keeps fingerprint consistent.
@@ -1135,6 +1174,15 @@ async def main() -> None:
         proxy_groups = (proxy_input or {}).get("apifyProxyGroups") or []
         is_residential = any("RESIDENTIAL" in (g or "").upper() for g in proxy_groups)
 
+        # Resolve the browser timezone from the selected proxy country so the IP
+        # geolocation and JS Intl.DateTimeFormat timezone match — a key DataDome signal.
+        proxy_country = ((proxy_input or {}).get("apifyProxyCountry") or "").strip().upper()
+        tz_candidates = COUNTRY_TIMEZONES.get(proxy_country, [_DEFAULT_TIMEZONE])
+        browser_timezone = random.choice(tz_candidates)
+        Actor.log.info(
+            f"Proxy country: {proxy_country or '(not set)'} → browser timezone: {browser_timezone}"
+        )
+
         if proxy_input:
             apify_proxy_config = await Actor.create_proxy_configuration(
                 actor_proxy_input=proxy_input
@@ -1205,7 +1253,7 @@ async def main() -> None:
         # resolver. Crawlee calls new_url_function() per-request and injects the proxy
         # URL at browser.new_context() time — Firefox/Camoufox supports this fully.
         crawler = PlaywrightCrawler(
-            browser_pool=BrowserPool(plugins=[CamoufoxPlugin()]),
+            browser_pool=BrowserPool(plugins=[CamoufoxPlugin(timezone=browser_timezone)]),
             proxy_configuration=crawlee_proxy_config,
             # Crawlee retries the request when scrape_place() raises CaptchaBlockedError.
             max_request_retries=max_retries,
