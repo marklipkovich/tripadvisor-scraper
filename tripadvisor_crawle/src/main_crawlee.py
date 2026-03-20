@@ -68,12 +68,20 @@ class CamoufoxPlugin(PlaywrightBrowserPlugin):
         vp = random.choice(VIEWPORTS)
         Actor.log.info(f"  Browser: Camoufox (Firefox) | {vp['width']}×{vp['height']}")
         # Start with Camoufox-specific defaults, then let Crawlee's options override.
+        # Rotate OS fingerprint per browser instance so consecutive retries look like
+        # different machines.  "linux" is deliberately excluded — it is far less common
+        # on residential browsing and more strongly associated with bots/scrapers.
+        chosen_os = random.choice(["windows", "macos"])
+        Actor.log.debug(f"  Camoufox OS fingerprint: {chosen_os}")
         launch_options: dict = {
-            "os": "windows",
+            "os": chosen_os,
             "block_webrtc": True,
             # locale="en-US" matches make_context() in main.py so TripAdvisor's GraphQL
             # API receives Accept-Language: en-US and returns a parseable list response.
             "locale": "en-US",
+            # Simulates natural mouse movement curves and micro-pauses — helps pass
+            # DataDome's behavioural analysis without changing anything we scrape.
+            "humanize": True,
             **self._browser_launch_options,
         }
         # Put headless AFTER the spread so our value takes precedence over Crawlee's
@@ -1137,7 +1145,23 @@ async def main() -> None:
                 _apify_proxy = apify_proxy_config  # capture non-None ref for closure
 
                 async def _get_proxy_url(session_id: Optional[str] = None, request: Any = None) -> Optional[str]:
-                    info = await _apify_proxy.new_proxy_info(session_id=session_id)
+                    # Pin each place to a consistent residential IP by using the TripAdvisor
+                    # location ID as the session key.  On retries we append _r2, _r3 … so
+                    # Apify assigns a DIFFERENT IP — same idea as main_old.py's
+                    # "{loc_id}_r{attempt}" pattern that proved stable in production.
+                    effective_session = session_id  # fallback for non-place requests
+                    if request is not None:
+                        url_str = getattr(request, "url", "") or ""
+                        m = re.search(r"-d(\d+)-", url_str)
+                        if m:
+                            loc_id = m.group(1)
+                            retry = getattr(request, "retry_count", 0) or 0
+                            effective_session = loc_id if retry == 0 else f"{loc_id}_r{retry + 1}"
+                            Actor.log.debug(
+                                f"  Proxy session: {effective_session} "
+                                f"(loc={loc_id}, retry={retry})"
+                            )
+                    info = await _apify_proxy.new_proxy_info(session_id=effective_session)
                     if info:
                         return f"{info.scheme}://{info.username}:{info.password}@{info.hostname}:{info.port}"
                     return None
