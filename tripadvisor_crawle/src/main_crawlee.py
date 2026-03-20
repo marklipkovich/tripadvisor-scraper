@@ -607,7 +607,7 @@ def parse_review_from_graphql(data: list) -> list[dict]:
 #  GRAPHQL DIRECT FETCH  (identical to main.py)
 # ══════════════════════════════════════════════════════════════════════════════
 
-PARALLEL_REQUESTS = 40
+PARALLEL_REQUESTS = 10
 PUSH_BATCH_SIZE = 100
 
 
@@ -741,7 +741,7 @@ async def scrape_place(
             await route.abort()
         else:
             await route.continue_()
-    await page.route("**/*", _block_resources)
+    #await page.route("**/*", _block_resources)
 
     captcha_detected = asyncio.Event()
 
@@ -794,7 +794,7 @@ async def scrape_place(
     captcha_was_resolved = False
     captcha_task = asyncio.create_task(captcha_detected.wait())
     page_task = asyncio.create_task(
-        tab_locator.wait_for(state="visible", timeout=60_000 if has_proxy else 30_000)
+        tab_locator.wait_for(state="visible", timeout=20_000 if has_proxy else 10_000)
     )
     done, pending = await asyncio.wait(
         [captcha_task, page_task],
@@ -811,24 +811,40 @@ async def scrape_place(
         exc = page_task.exception() if not page_task.cancelled() else None
         if exc is not None:
             page_task_failed = True
-            Actor.log.warning(f"  Page tab not found (page may have redirected): {exc!s:.120}")
 
     if captcha_detected.is_set():
         captcha_seen = True
         Actor.log.info("  Captcha detected — checking if Camoufox resolves it …")
         await Actor.set_status_message(f"Place {place_idx}/{total_places} — Captcha detected, waiting …")
     elif page_task_failed:
-        # Raise so Crawlee retries this request with a fresh browser + proxy
-        raise CaptchaBlockedError("Page did not load correctly (tab selector timed out — possible redirect)")
-    else:
-        Actor.log.info("  Page ready — continuing")
-        await Actor.set_status_message(f"Place {place_idx}/{total_places} — Scraping reviews …")
-
-    if not captcha_seen:
+        # Secondary captcha check: the frame may have attached before our
+        # listener was registered, or after the tab wait already timed out.
         for frame in page.frames:
             if frame != page.main_frame and "captcha-delivery.com" in (frame.url or "").lower():
                 captcha_seen = True
                 break
+        if not captcha_seen:
+            # Diagnose what is actually on the page before raising.
+            current_url = page.url
+            page_title = ""
+            try:
+                page_title = await page.title()
+            except Exception:
+                pass
+            Actor.log.warning(
+                f"  Reviews tab not visible after timeout — "
+                f"URL: {current_url[:80]} | title: {page_title[:60]}"
+            )
+            raise CaptchaBlockedError(
+                f"Reviews tab not visible after {20_000 if has_proxy else 10_000}ms "
+                f"(URL: {current_url[:60]})"
+            )
+        else:
+            Actor.log.info("  Captcha detected (late frame) — checking if Camoufox resolves it …")
+            await Actor.set_status_message(f"Place {place_idx}/{total_places} — Captcha detected, waiting …")
+    else:
+        Actor.log.info("  Page ready — continuing")
+        await Actor.set_status_message(f"Place {place_idx}/{total_places} — Scraping reviews …")
 
     # Poll up to 12 s for Camoufox to auto-resolve DataDome captcha
     if captcha_seen:
@@ -950,7 +966,7 @@ async def scrape_place(
         )
 
     if loc_id:
-        reviews_per_page = 10
+        reviews_per_page = 5
         reviews_offset = 0
         while True:
             if max_reviews and total_pushed + len(reviews) >= max_reviews:
@@ -1138,9 +1154,12 @@ async def main() -> None:
                 "regardless of browser fingerprint — enable Residential Proxy in the input."
             )
 
-        # Crawlee retries on exception; we use max_request_retries to cap captcha retries.
-        # Datacenter IPs are always blocked — fail fast with retries=1.
-        max_retries = 3 if is_residential else 1
+        # max_request_retries = N means: 1 initial attempt + N retries = N+1 total attempts.
+        # total_attempts is used for display ("attempt X/Y") and exhaustion checks.
+        # Without residential proxy datacenter IPs are always blocked by DataDome —
+        # no point retrying, fail immediately after the first attempt.
+        max_retries = 3 if is_residential else 0
+        total_attempts = max_retries + 1  # residential: 4 total | no proxy: 1 total
 
         await Actor.set_status_message(f"Starting — {len(raw_urls)} place(s) to process …")
 
@@ -1195,17 +1214,17 @@ async def main() -> None:
             current_seq = url_seq[place_url]
 
             proxy_groups_str = ", ".join(proxy_groups) if proxy_groups else "NONE"
-            attempt_str = f" (attempt {attempt}/{max_retries})" if max_retries > 1 else ""
+            attempt_str = f" (attempt {attempt}/{total_attempts})" if total_attempts > 1 else ""
             Actor.log.info(f"[{current_seq}/{len(place_urls)}] Processing: {place_url[:70]}...")
             Actor.log.info(f"  proxy={proxy_groups_str}{attempt_str}")
 
             if attempt > 1:
                 # Exponential backoff: 3 s, 6 s, 12 s … with ±1 s jitter
                 backoff = 3.0 * (2 ** (attempt - 2)) + random.uniform(0.5, 1.5)
-                Actor.log.info(f"  Backoff {backoff:.1f}s before retry attempt {attempt}/{max_retries} …")
+                Actor.log.info(f"  Backoff {backoff:.1f}s before retry attempt {attempt}/{total_attempts} …")
                 await asyncio.sleep(backoff)
                 await Actor.set_status_message(
-                    f"Place {current_seq}/{len(place_urls)} — Retrying (attempt {attempt}/{max_retries}) …"
+                    f"Place {current_seq}/{len(place_urls)} — Retrying (attempt {attempt}/{total_attempts}) …"
                 )
             else:
                 await Actor.set_status_message(f"Place {current_seq}/{len(place_urls)} — Loading …")
@@ -1222,10 +1241,10 @@ async def main() -> None:
                     total_places=len(place_urls),
                 )
             except CaptchaBlockedError:
-                if attempt >= max_retries:
+                if attempt >= total_attempts:
                     err_msg = (
                         f"Place {current_seq}/{len(place_urls)} blocked by DataDome after "
-                        f"{max_retries} attempt(s) — IP pool may be temporarily flagged. "
+                        f"{total_attempts} attempt(s) — IP pool may be temporarily flagged. "
                         "This place will be skipped."
                     )
                     Actor.log.error(f"  {err_msg}")
