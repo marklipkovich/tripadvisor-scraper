@@ -1,0 +1,52 @@
+authority
+www.tripadvisor.com
+:method
+POST
+:path
+/data/graphql/ids
+:scheme
+https
+accept
+*/*
+accept-encoding
+gzip, deflate, br, zstd
+accept-language
+en-US,en;q=0.9,ru;q=0.8
+cache-control
+no-cache
+content-length
+1049
+content-type
+application/json
+cookie
+TAUnique=%1%enc%3A5gTUfGbNrNc6XtZnaPu3SJGiUJBvLJqdAuKxHe1L6ehyOeEEpxZp%2Bihi6KhG1bVANox8JbUSTxk%3D; TADCID=eueoW6zVzOTaKRmaABQChrLCR-aOT_K5vlfY_RXuc4xJzEbN7-I5rWGgr2xsKqQexkJVSjRhVJ6fEAYV2p3EZeSyV_NkDbXpJPA; TASSK=enc%3AALfbHNzDHZJXlFDJmqGbqpym2VKmbAJAusHwVdNoORLqBpvA6iMxteUYpmCMVneBLb6K6Yk4jY%2F25BxlpoRohFa879IPZes1%2FSoZeQN860y1JWLCwIKD14dNBFcOreSW5A%3D%3D; TART=%1%enc%3AA3VA1y8Zc%2Bxh7ried9shIvae3YfqxxjXQHIlZJaDyqgafiSjK%2BNWlkp%2FmcIuEBbNCeyaC1LeImE%3D; TATrkConsent=eyJvdXQiOiIiLCJpbiI6IkFMTCJ9; _gcl_au=1.1.1933322269.1773649912; _li_dcdm_c=.tripadvisor.com; _lc2_fpi=b140173de591--01kktwbqz9a7v2kbt5knjedsgp; _lc2_fpi_meta=%7B%22w%22%3A1773649911785%7D; pbjs_sharedId=2b96993d-fe88-4a85-8c15-2abaff17a1e9; pbjs_sharedId_cst=znv0HA%3D%3D; _lr_env_src_ats=false; pbjs_unifiedID=%7B%22TDID%22%3A%22d9091ce4-982a-43f1-a131-8bbb07c123e1%22%2C%22TDID_LOOKUP%22%3A%22TRUE%22%2C%22TDID_CREATED_AT%22%3A%222026-02-16T08%3A31%3A52%22%7D; pbjs_unifiedID_cst=znv0HA%3D%3D; pbjs_li_nonid=%7B%7D; pbjs_li_nonid_cst=znv0HA%3D%3D; TAAUTHEAT=NBzUNLbOMADtvKJRABQCDNh9ChrxTqaZzdzJ8C6-00wgzM0RVU9A6xUKKUC2scmQa5_YU7F50glB33DGGQNF_HbPNUChF3Sd1s81e-eOWjJzCMButj-ZeffKeshKO7dco_-fcwYbb8RxpqbG0W32wSDwwoqrsSqjxaD8jIdvbjdnV2BOVZz62ZYoaeDOoOldnypezBgNI-5uTbN9GrT3fDRQHjH2rjdTgeBi; ServerPool=X; PMC=V2*MS.46*MD.20260316*LD.20260316; TATravelInfo=V2*A.2*MG.-1*HP.2*FL.3*RS.1; G_AUTH2_MIGRATION=informational; _lr_sampling_rate=100; roybatty=TNI1625!AL1k%2BjDO%2BI6MZAYZcRZfoBr4vo%2FelvyZev%2Bai2rnjBU%2F%2BZrQcjvViFnS1HYeCClqMH6EEBJndIQpbsx2VYQ%2F2jja3Adc2BT8WnMlhGkgKgmb%2ByS8e3umXywNkcHshQyoPR21IjPlgaA4NvXOsKTqGrN8CJvFYp%2B%2BmBnBSCorDNtSfAbcQwKhLKxqQZ3WkI1m0w%3D%3D%2C1; TAUD=LA-1773649915525-1*RDD-1-2026_03_16*LG-16044459-2.1.F.*LD-16044460-.....; TASID=76C6DD735983FEB9E1A313CFEFE698E0; PAC=AKBRJ8Gg0KoKN5usPG3PhB8ekxYo1hWwiamBSTB2jkxBnh_zgdhIpiFGAC7vcQqFQSObO1Yl6tExTspQbPyS3YH4hb55-zESLZdKVXP5cpdga7hK8U-iasNpM25lD3oq4l6ufFtATTwS1xDYfHlU6NEzXbKOZ5W1AwZQs7BfmtIu8oTHXZcrotwDCoyuJVcqarpLp_hOZ_7wq2UejcwU71uJdyGwMhlFNVq_XpRhsbBhMz44nhJl9p10Nmdzrby1dA%3D%3D; SRT=TART_SYNC; TASession=%1%V2ID.76C6DD735983FEB9E1A313CFEFE698E0*SQ.38*PR.40185%7C*LS.Hotel_Review*HS.recommended*ES.popularity*DS.5*SAS.popularity*FPS.oldFirst*TS.9F1729085B4241C14CB39B92E93A7D4F*FA.1*DF.0*TRA.true; OptanonConsent=isGpcEnabled=0&datestamp=Mon+Mar+16+2026+18%3A57%3A11+GMT%2B0500+(Kazakhstan+Time)&version=202601.2.0&browserGpcFlag=0&isIABGlobal=false&hosts=&consentId=9F1729085B4241C14CB39B92E93A7D4F&interactionCount=1&isAnonUser=0&prevHadToken=0&landingPath=NotLandingPage&groups=C0001%3A1%2CC0002%3A1%2CC0003%3A1%2CC0004%3A1&AwaitingReconsent=false&crTime=1773650118191; _gcl_aw=GCL.1773669432.null; datadome=5nAeh9huwhSB71f9J7AomDdTZxHFQahwGEuHJA0Jmv77EmyeJ6MHNEEGKmsvuOu3~pNtdYUta~2rlg3GVUHNHY0T~tEU6Z3UCZuGgigHmLQbUTs5THMcW~~ZRL_P_6nQ; _lr_retry_request=true; __gads=ID=6ab628534506673f:T=1773649913:RT=1773669619:S=ALNI_MajzGS4cxFOceaylXCv-MQ7nmJILw; __gpi=UID=0000139367575cca:T=1773649913:RT=1773669619:S=ALNI_MYF0hQxHFJxxEPOfJowkKOCxFUPCg; __eoi=ID=ae95b4678e0386f0:T=1773649913:RT=1773669619:S=AA-AfjZ3JnRaTNUwxmGqHiH7E5Pv; __vt=fr__MgCK71rzy-DIABQCT24E-H_BQo6gx1APGQJPtzwotVo3BUp4CkY1cRi8XUYHp58hqOQFwz97_iOPiFNZ_rF7qeC2JOvCBDChiHW7L0t-nWeyF6Ul6BODTODoWnDMa_nzwK4-g8Kib46TPEOF-_PcjFD8XVyZNovvuSNrgO4kwWwPfi855F_bBQuyvfeQpoZZe4eUwl822dHT51FxeLLnVorsV8AM-gH4tGGuQTTohBBnTJSByXk3vBnnFLn6dbc
+origin
+https://www.tripadvisor.com
+pragma
+no-cache
+priority
+u=1, i
+referer
+https://www.tripadvisor.com/Hotel_Review-g190327-d264936-Reviews-1926_Le_Soleil_Hotel_Spa-Sliema_Island_of_Malta.html
+sec-ch-device-memory
+8
+sec-ch-ua
+"Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145"
+sec-ch-ua-arch
+""
+sec-ch-ua-full-version-list
+"Not:A-Brand";v="99.0.0.0", "Google Chrome";v="145.0.7632.160", "Chromium";v="145.0.7632.160"
+sec-ch-ua-mobile
+?1
+sec-ch-ua-model
+"Nexus 5"
+sec-ch-ua-platform
+"Android"
+sec-fetch-dest
+empty
+sec-fetch-mode
+same-origin
+sec-fetch-site
+same-origin
+user-agent
+Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Mobile Safari/537.36

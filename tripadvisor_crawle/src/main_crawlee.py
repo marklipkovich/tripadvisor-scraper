@@ -2,28 +2,34 @@
 TripAdvisor Reviews Scraper — Crawlee Edition
 ══════════════════════════════════════════════════════════════════════════════
 
-Crawlee vs raw-Playwright comparison:
+Architecture: BasicCrawler (request queue) + shared Camoufox browser+context.
 
-  What Crawlee now provides:
-    • Browser lifecycle management (launch / close)
-    • Request queue (place URLs)
-    • Concurrency control (max_concurrency)
-    • Automatic URL-level retries (max_request_retries)
-    • Session / proxy rotation via ProxyConfiguration
+  Crawlee's BasicCrawler provides:
+    • Request queue with deduplication
+    • Sequential processing (max_concurrency=1)
+    • request_handler_timeout enforcement
+
+  We manage the browser lifecycle manually so that ONE Camoufox browser and
+  ONE Playwright context are shared across all places.  DataDome cookies
+  earned on place 1 carry forward to place 2, 3 … making each successive
+  place less likely to trigger a challenge.
+
+  When a place is blocked (CaptchaBlockedError):
+    1. Close the blocked page.
+    2. Rotate to a new Apify Proxy session (different residential IP).
+    3. Probe the new IP's timezone (or use static country mapping).
+    4. Close the old context + browser; launch a fresh one.
+    5. Re-add the blocked URL to the Crawlee queue for retry.
+       All places still in the queue benefit from the fresh context.
+
+  Per-place failure counter tracks how many times each place has been blocked.
+  After max_retries blocks the place is skipped and scraping continues.
 
   What we still manage manually (unchanged from main.py):
     • Captcha detection & 12-second polling window
     • GraphQL parallel fetches (40 × asyncio.gather)
     • Review parsing & dataset push batching
     • All data extraction logic
-
-Key structural changes from main.py:
-    • CamoufoxPlugin           — injects Camoufox into Crawlee's BrowserPool
-    • scrape_place()           — accepts a Crawlee-provided Page; no browser/context args
-    • main()                   — uses PlaywrightCrawler instead of async_playwright + manual loop
-    • CrawleeProxyConfiguration — wraps Apify's proxy resolver; Crawlee injects proxy at
-                                  browser.new_context() time (Firefox/Camoufox supports this)
-    • Retries                  — Crawlee retries on CaptchaBlockedError (replaces manual loop)
 """
 
 from __future__ import annotations
@@ -35,17 +41,14 @@ from datetime import timedelta
 from typing import Any, Optional
 from urllib.parse import urlparse
 
-import httpx  # type: ignore[import-untyped]  # transitive dep of crawlee
+import httpx  # type: ignore[import-untyped]
 
 from apify import Actor
 from camoufox import AsyncNewBrowser
 from crawlee import ConcurrencySettings, Request
-from crawlee.browsers import BrowserPool, PlaywrightBrowserController, PlaywrightBrowserPlugin
-from crawlee.crawlers import PlaywrightCrawler, PlaywrightCrawlingContext
+from crawlee.crawlers import BasicCrawler, BasicCrawlingContext
 from crawlee.events import Event
-from crawlee.proxy_configuration import ProxyConfiguration as CrawleeProxyConfiguration
-from playwright.async_api import Page
-from typing_extensions import override
+from playwright.async_api import Page, async_playwright
 
 
 # Set to True to run the browser headless locally (e.g. when debugging without a GUI).
@@ -79,79 +82,6 @@ _DEFAULT_TIMEZONE = "Europe/London"
 
 class CaptchaBlockedError(Exception):
     """Raised when DataDome captcha cannot be bypassed with the current proxy."""
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  CRAWLEE: CAMOUFOX BROWSER PLUGIN
-# ══════════════════════════════════════════════════════════════════════════════
-
-class CamoufoxPlugin(PlaywrightBrowserPlugin):
-    """
-    Crawlee BrowserPlugin that launches Camoufox (stealth Firefox) instead of
-    standard Playwright Firefox.  All other PlaywrightBrowserPlugin behaviour
-    (context creation, proxy injection, page lifecycle) is inherited unchanged.
-    """
-
-    def __init__(self, timezone: str = _DEFAULT_TIMEZONE, **kwargs: Any) -> None:
-        # timezone_id is a Playwright *context* option, not a browser-launch option.
-        # We store _ctx_opts as an instance attribute so update_timezone() can mutate
-        # it in-place — PlaywrightBrowserPlugin stores the same dict reference, so the
-        # change takes effect on the very next new_context() call (before each place).
-        self._ctx_opts: dict = dict(kwargs.pop("browser_new_context_options", None) or {})
-        self._ctx_opts["timezone_id"] = timezone
-        super().__init__(browser_new_context_options=self._ctx_opts, **kwargs)
-        self._timezone = timezone
-
-    def update_timezone(self, timezone: str) -> None:
-        """
-        Update the timezone for the next browser context created by Crawlee.
-        Called from _get_proxy_url() after detecting the proxy exit IP's timezone,
-        before Crawlee creates the context for that request.
-        Mutates _ctx_opts in-place — the parent plugin holds the same dict reference.
-        """
-        self._timezone = timezone
-        self._ctx_opts["timezone_id"] = timezone
-        # Safety: also update the parent's copy in case it was stored separately.
-        for attr in ("_browser_new_context_options", "browser_new_context_options"):
-            stored = getattr(self, attr, None)
-            if isinstance(stored, dict) and stored is not self._ctx_opts:
-                stored["timezone_id"] = timezone
-
-    @override
-    async def new_browser(self) -> PlaywrightBrowserController:
-        if not self._playwright:
-            raise RuntimeError("Playwright browser plugin is not initialized.")
-        vp = random.choice(VIEWPORTS)
-        Actor.log.info(f"  Browser: Camoufox (Firefox) | {vp['width']}×{vp['height']} | tz={self._timezone}")
-        # Start with Camoufox-specific defaults, then let Crawlee's options override.
-        # Rotate OS fingerprint per browser instance so consecutive retries look like
-        # different machines.  "linux" is deliberately excluded — it is far less common
-        # on residential browsing and more strongly associated with bots/scrapers.
-        chosen_os = random.choice(["windows", "macos"])
-        Actor.log.debug(f"  Camoufox OS fingerprint: {chosen_os}")
-        launch_options: dict = {
-            "os": chosen_os,
-            "block_webrtc": True,
-            # locale="en-US" keeps TripAdvisor's GraphQL returning English results.
-            # We keep this fixed regardless of proxy country — a UK user browsing in
-            # English is completely natural on TripAdvisor.
-            "locale": "en-US",
-            # Simulates natural mouse movement curves and micro-pauses — helps pass
-            # DataDome's behavioural analysis without changing anything we scrape.
-            "humanize": True,
-            **self._browser_launch_options,
-        }
-        # Put headless AFTER the spread so our value takes precedence over Crawlee's
-        # internal default. Always True on Apify Cloud; locally controlled by FORCE_HEADLESS.
-        import os as _os
-        launch_options["headless"] = _os.environ.get("APIFY_IS_AT_HOME") == "1" or FORCE_HEADLESS
-        return PlaywrightBrowserController(
-            browser=await AsyncNewBrowser(self._playwright, **launch_options),
-            # One page per Camoufox instance keeps fingerprint consistent.
-            max_open_pages_per_browser=1,
-            # Camoufox generates its own headers — disable Crawlee's generator.
-            header_generator=None,
-        )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -672,7 +602,8 @@ def parse_review_from_graphql(data: list) -> list[dict]:
 #  GRAPHQL DIRECT FETCH  (identical to main.py)
 # ══════════════════════════════════════════════════════════════════════════════
 
-PARALLEL_REQUESTS = 10
+PARALLEL_REQUESTS = 40
+REVIEWS_PER_PAGE = 10
 PUSH_BATCH_SIZE = 100
 
 
@@ -683,7 +614,7 @@ async def fetch_reviews_via_graphql(
     page: Page,
     loc_id: str,
     offset: int,
-    reviews_per_page: int = 10,
+    reviews_per_page: int = REVIEWS_PER_PAGE,
     rating_filters: Optional[list] = None,
     language_filter: Optional[str] = None,
 ) -> list[dict]:
@@ -1031,18 +962,17 @@ async def scrape_place(
         )
 
     if loc_id:
-        reviews_per_page = 5
         reviews_offset = 0
         while True:
             if max_reviews and total_pushed + len(reviews) >= max_reviews:
                 break
             batch_offsets = [
-                reviews_offset + i * reviews_per_page
+                reviews_offset + i * REVIEWS_PER_PAGE
                 for i in range(PARALLEL_REQUESTS)
             ]
             tasks = [
                 fetch_reviews_via_graphql(
-                    page, loc_id, off, reviews_per_page,
+                    page, loc_id, off, REVIEWS_PER_PAGE,
                     rating_filters=rating_filters,
                     language_filter=language_filter,
                 )
@@ -1064,17 +994,17 @@ async def scrape_place(
                         if end_ts and review_date and review_date > end_ts:
                             continue
                         reviews.append(t)
-                    if len(extracted) < reviews_per_page:
+                    if len(extracted) < REVIEWS_PER_PAGE:
                         got_partial = True
                         Actor.log.debug(f"  Partial response at offset {batch_offsets[i]}: {len(extracted)} reviews")
             if not got_any or got_partial:
                 if got_partial:
                     Actor.log.info(f"  Reached end of reviews at offset ~{reviews_offset} (last batch had partial)")
                 break
-            reviews_offset += PARALLEL_REQUESTS * reviews_per_page
+            reviews_offset += PARALLEL_REQUESTS * REVIEWS_PER_PAGE
             # Capture the stop condition BEFORE pushing so batches are always
             # flushed even on the last iteration (fixes single 300-review push
-            # when max_reviews < PARALLEL_REQUESTS * reviews_per_page).
+            # when max_reviews < PARALLEL_REQUESTS * REVIEWS_PER_PAGE).
             stop_after_push = bool(max_reviews and reviews_offset >= max_reviews)
 
             reviews.sort(key=_date_sort_key, reverse=True)
@@ -1167,7 +1097,7 @@ async def _probe_proxy_timezone(proxy_url: str) -> tuple[str, str]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  ACTOR ENTRY POINT  (Crawlee edition)
+#  ACTOR ENTRY POINT
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def main() -> None:
@@ -1231,24 +1161,12 @@ async def main() -> None:
         if language_filter:
             Actor.log.info(f"Language filter: {language_filter}")
 
-        # ── Proxy ─────────────────────────────────────────────────────────────
-        # We create Crawlee's own ProxyConfiguration backed by Apify's proxy resolver.
-        # Crawlee passes the proxy URL to each browser context at creation time, which
-        # Firefox/Camoufox supports via Playwright's browser.new_context(proxy=...).
+        # ── Proxy setup ────────────────────────────────────────────────────────
         apify_proxy_config = None
-        crawlee_proxy_config = None
         proxy_groups = (proxy_input or {}).get("apifyProxyGroups") or []
         is_residential = any("RESIDENTIAL" in (g or "").upper() for g in proxy_groups)
-
         proxy_country = ((proxy_input or {}).get("apifyProxyCountry") or "").strip().upper()
-        # browser_timezone is the default/static value; per-session detection happens
-        # inside _get_proxy_url so every place and every retry gets the right timezone.
         browser_timezone = _DEFAULT_TIMEZONE
-
-        # Cache: session_id → (timezone, source_label).
-        # source_label is shown in logs so it's always clear where the timezone came from
-        # (ipinfo probe, ip-api fallback, static country mapping, or default).
-        _session_tz_cache: dict[str, tuple[str, str]] = {}
 
         if proxy_input:
             apify_proxy_config = await Actor.create_proxy_configuration(
@@ -1256,53 +1174,6 @@ async def main() -> None:
             )
             if apify_proxy_config is not None:
                 Actor.log.info("Proxy configuration loaded.")
-
-                _apify_proxy = apify_proxy_config  # capture non-None ref for closure
-
-                async def _get_proxy_url(session_id: Optional[str] = None, request: Any = None) -> Optional[str]:
-                    # Pin each place to a consistent residential IP by using the TripAdvisor
-                    # location ID as the session key.  On retries we append _r2, _r3 … so
-                    # Apify assigns a DIFFERENT IP — same idea as main_old.py's
-                    # "{loc_id}_r{attempt}" pattern that proved stable in production.
-                    effective_session = session_id  # fallback for non-place requests
-                    if request is not None:
-                        url_str = getattr(request, "url", "") or ""
-                        m = re.search(r"-d(\d+)-", url_str)
-                        if m:
-                            loc_id = m.group(1)
-                            retry = getattr(request, "retry_count", 0) or 0
-                            effective_session = loc_id if retry == 0 else f"{loc_id}_r{retry + 1}"
-                    info = await _apify_proxy.new_proxy_info(session_id=effective_session)
-                    if info:
-                        proxy_url = (
-                            f"{info.scheme}://{info.username}:"
-                            f"{info.password}@{info.hostname}:{info.port}"
-                        )
-                        # ── Per-session timezone detection ────────────────────────────
-                        # Each session can map to a different country's IP, so we probe
-                        # once per session and cache the result.  When a country is
-                        # explicitly selected in the input the static mapping is used
-                        # (no HTTP request needed — all IPs are from the same country).
-                        if effective_session not in _session_tz_cache:
-                            if proxy_country and proxy_country in COUNTRY_TIMEZONES:
-                                tz = random.choice(COUNTRY_TIMEZONES[proxy_country])
-                                _session_tz_cache[effective_session] = (
-                                    tz, f"mapping:{proxy_country}"
-                                )
-                            else:
-                                tz, src = await _probe_proxy_timezone(proxy_url)
-                                _session_tz_cache[effective_session] = (tz, src)
-                            # Push the detected timezone into the plugin so Crawlee's
-                            # next new_context() call uses it.  This must happen before
-                            # PlaywrightBrowserPlugin creates the context (it does so
-                            # immediately after _get_proxy_url returns).
-                            camoufox_plugin.update_timezone(
-                                _session_tz_cache[effective_session][0]
-                            )
-                        return proxy_url
-                    return None
-
-                crawlee_proxy_config = CrawleeProxyConfiguration(new_url_function=_get_proxy_url)
             else:
                 Actor.log.warning(
                     "Proxy configuration could not be initialised (no valid credentials locally). "
@@ -1314,12 +1185,11 @@ async def main() -> None:
                 "regardless of browser fingerprint — enable Residential Proxy in the input."
             )
 
-        # ── Initial browser timezone (used before first proxy session is probed) ─
         if proxy_country and proxy_country in COUNTRY_TIMEZONES:
             browser_timezone = random.choice(COUNTRY_TIMEZONES[proxy_country])
             Actor.log.info(
                 f"Proxy country: {proxy_country} → browser timezone: {browser_timezone} "
-                f"(static mapping, applied to every session)"
+                "(static mapping, applied to every session)"
             )
         elif apify_proxy_config is not None:
             Actor.log.info(
@@ -1328,21 +1198,15 @@ async def main() -> None:
         else:
             Actor.log.info(f"No proxy — browser timezone: {browser_timezone} (default)")
 
-        # max_request_retries = N means: 1 initial attempt + N retries = N+1 total attempts.
-        # total_attempts is used for display ("attempt X/Y") and exhaustion checks.
         # Without residential proxy datacenter IPs are always blocked by DataDome —
-        # no point retrying, fail immediately after the first attempt.
+        # no point retrying with the same IP, fail immediately after first attempt.
         max_retries = 3 if is_residential else 0
-        total_attempts = max_retries + 1  # residential: 4 total | no proxy: 1 total
+        total_attempts = max_retries + 1  # residential: 4 | no proxy: 1
 
         await Actor.set_status_message(f"Starting — {len(raw_urls)} place(s) to process …")
 
-        # Shared state accumulated across all place requests
-        all_places: list[dict] = []
-        total_reviews_counter = [0]  # list so closure can mutate
-        seq_counter = [0]            # increments once per unique URL (retries reuse same number)
-        url_seq: dict[str, int] = {} # url → sequential processing-order number
-        place_urls = []
+        # ── Normalise place URLs ──────────────────────────────────────────────
+        place_urls: list[str] = []
         for entry in raw_urls:
             url = entry.get("url") if isinstance(entry, dict) else entry
             if url and str(url).strip():
@@ -1350,117 +1214,203 @@ async def main() -> None:
                 if norm:
                     place_urls.append(norm)
 
-        # ── Crawlee PlaywrightCrawler with CamoufoxPlugin ────────────────────
-        # camoufox_plugin is created as a named variable so _get_proxy_url() can call
-        # camoufox_plugin.update_timezone() before each context is created — giving
-        # every place and every retry the correct timezone for its actual proxy IP.
-        camoufox_plugin = CamoufoxPlugin(timezone=browser_timezone)
+        all_places: list[dict] = []
+        total_reviews_counter = [0]  # list so nested function can mutate
+        seq_counter = [0]
+        url_seq: dict[str, int] = {}
 
-        # proxy_configuration is Crawlee's own ProxyConfiguration backed by Apify's
-        # resolver. Crawlee calls new_url_function() per-request and injects the proxy
-        # URL at browser.new_context() time — Firefox/Camoufox supports this fully.
-        crawler = PlaywrightCrawler(
-            browser_pool=BrowserPool(plugins=[camoufox_plugin]),
-            proxy_configuration=crawlee_proxy_config,
-            # Crawlee retries the request when scrape_place() raises CaptchaBlockedError.
-            max_request_retries=max_retries,
-            # Process one place at a time (sequential, same as main.py).
-            concurrency_settings=ConcurrencySettings(max_concurrency=1, desired_concurrency=1),
-            # Don't let Crawlee intercept bot-protection responses — we handle it ourselves.
-            retry_on_blocked=False,
-            # Disable Crawlee's logging setup to avoid conflict with Apify's Actor.log.
-            configure_logging=False,
-            # Ignore HTTP error codes so Camoufox can handle DataDome / captcha responses.
-            # Without this, Crawlee raises HttpClientStatusCodeError before our handler runs.
-            ignore_http_error_status_codes=[403, 429, 503],
-            # Default 60 s is too short for scraping a full place — raise to 20 min.
-            request_handler_timeout=timedelta(seconds=1200),
-            # Default Crawlee navigation timeout is 60 s. Residential proxy adds
-            # latency; 120 s prevents wasting a retry slot on a slow first load.
-            navigation_timeout=timedelta(seconds=120),
-        )
+        # ── Shared browser + context — BasicCrawler edition ───────────────────
+        # BasicCrawler provides the request queue and sequential processing.
+        # We manage the Camoufox browser lifecycle ourselves so that one context
+        # is shared across all places (DataDome cookies persist between places).
+        # On block: we rotate the browser/proxy before re-adding the URL to the
+        # queue; all subsequent places in the queue benefit from the fresh context.
+        import os as _os
 
-        @crawler.router.default_handler
-        async def handle_place(context: PlaywrightCrawlingContext) -> None:
-            place_url = context.request.url
-            attempt   = context.request.retry_count + 1
+        # Mutable dict holds the live browser, context, and session metadata so
+        # the handler closure can read and update them without nonlocal hacks.
+        _bs: dict = {
+            "browser": None,
+            "context": None,
+            "session_id": "run_s1",
+            "session_tz": browser_timezone,
+            "session_src": "default",
+            "rotation": 0,
+        }
 
-            # Assign a stable sequential number to each unique URL so logs always
-            # show 1/N, 2/N, 3/N regardless of Crawlee's retry reordering.
-            if place_url not in url_seq:
-                seq_counter[0] += 1
-                url_seq[place_url] = seq_counter[0]
-            current_seq = url_seq[place_url]
+        async with async_playwright() as pw:
 
-            proxy_groups_str = ", ".join(proxy_groups) if proxy_groups else "NONE"
-            attempt_str = f" (attempt {attempt}/{total_attempts})" if total_attempts > 1 else ""
-            # Compute the session ID that _get_proxy_url uses for this request (same logic).
-            _m = re.search(r"-d(\d+)-", place_url)
-            _loc = _m.group(1) if _m else f"place_{current_seq}"
-            _retry = context.request.retry_count
-            session_display = _loc if _retry == 0 else f"{_loc}_r{_retry + 1}"
-            # _session_tz_cache is populated by _get_proxy_url before handle_place runs.
-            # Unpack (timezone, source_label) — source makes it clear in logs whether
-            # the timezone came from ipinfo, ip-api, a static country mapping, or default.
-            _tz_entry = _session_tz_cache.get(session_display)
-            session_tz  = _tz_entry[0] if _tz_entry else browser_timezone
-            session_src = _tz_entry[1] if _tz_entry else "browser-default"
-            Actor.log.info(f"[{current_seq}/{len(place_urls)}] Processing: {place_url[:70]}...")
-            Actor.log.info(
-                f"  proxy={proxy_groups_str} | session={session_display} | "
-                f"tz={session_tz} [{session_src}]{attempt_str}"
+            async def _setup_browser(rotation: int) -> None:
+                """Close the current browser/context and launch a fresh one."""
+                if _bs["context"] is not None:
+                    try: await _bs["context"].close()
+                    except Exception: pass
+                if _bs["browser"] is not None:
+                    try: await _bs["browser"].close()
+                    except Exception: pass
+
+                session_id = f"run_s{rotation + 1}"
+                proxy_setting: Optional[dict] = None
+                session_tz = browser_timezone
+                session_src = "no-proxy"
+
+                if apify_proxy_config is not None:
+                    info = await apify_proxy_config.new_proxy_info(session_id=session_id)
+                    if info:
+                        proxy_url_str = (
+                            f"{info.scheme}://{info.username}:"
+                            f"{info.password}@{info.hostname}:{info.port}"
+                        )
+                        if proxy_country and proxy_country in COUNTRY_TIMEZONES:
+                            session_tz = random.choice(COUNTRY_TIMEZONES[proxy_country])
+                            session_src = f"mapping:{proxy_country}"
+                        else:
+                            session_tz, session_src = await _probe_proxy_timezone(proxy_url_str)
+                        proxy_setting = {
+                            "server": f"{info.scheme}://{info.hostname}:{info.port}",
+                            "username": info.username or "",
+                            "password": info.password or "",
+                        }
+
+                chosen_os = random.choice(["windows", "macos"])
+                vp = random.choice(VIEWPORTS)
+                is_headless = _os.environ.get("APIFY_IS_AT_HOME") == "1" or FORCE_HEADLESS
+                Actor.log.info(
+                    f"  Launching browser: os={chosen_os} | tz={session_tz} [{session_src}] | "
+                    f"{vp['width']}×{vp['height']} | session={session_id}"
+                )
+                browser = await AsyncNewBrowser(
+                    pw,
+                    os=chosen_os,
+                    block_webrtc=True,
+                    locale="en-US",
+                    humanize=True,
+                    headless=is_headless,
+                )
+                ctx_kwargs: dict = {
+                    "timezone_id": session_tz,
+                    "viewport": vp,
+                    "locale": "en-US",
+                }
+                if proxy_setting:
+                    ctx_kwargs["proxy"] = proxy_setting
+                _bs["browser"]     = browser
+                _bs["context"]     = await browser.new_context(**ctx_kwargs)
+                _bs["session_id"]  = session_id
+                _bs["session_tz"]  = session_tz
+                _bs["session_src"] = session_src
+                _bs["rotation"]    = rotation
+
+            await _setup_browser(0)
+
+            crawler = BasicCrawler(
+                # Crawlee schedules retries; we rotate the browser on each block
+                # before raising so all subsequent requests use the fresh context.
+                max_request_retries=max_retries,
+                concurrency_settings=ConcurrencySettings(
+                    max_concurrency=1, desired_concurrency=1
+                ),
+                configure_logging=False,
+                request_handler_timeout=timedelta(seconds=1200),
             )
 
-            if attempt > 1:
-                # Exponential backoff: 3 s, 6 s, 12 s … with ±1 s jitter
-                backoff = 3.0 * (2 ** (attempt - 2)) + random.uniform(0.5, 1.5)
-                Actor.log.info(f"  Backoff {backoff:.1f}s before retry attempt {attempt}/{total_attempts} …")
-                await asyncio.sleep(backoff)
-                await Actor.set_status_message(
-                    f"Place {current_seq}/{len(place_urls)} — Retrying (attempt {attempt}/{total_attempts}) …"
-                )
-            else:
-                await Actor.set_status_message(f"Place {current_seq}/{len(place_urls)} — Loading …")
+            @crawler.router.default_handler
+            async def handle_place(context: BasicCrawlingContext) -> None:
+                place_url  = context.request.url
+                retry_count = context.request.retry_count  # 0 on first attempt
 
-            try:
-                place_obj, pushed = await scrape_place(
-                    context.page, place_url, max_reviews,
-                    has_proxy=crawlee_proxy_config is not None,
-                    start_date=start_date or None,
-                    end_date=end_date or None,
-                    rating_filters=rating_filters or None,
-                    language_filter=language_filter or None,
-                    place_idx=current_seq,
-                    total_places=len(place_urls),
+                if place_url not in url_seq:
+                    seq_counter[0] += 1
+                    url_seq[place_url] = seq_counter[0]
+                place_seq   = url_seq[place_url]
+                total_places = len(place_urls)
+
+                proxy_groups_str = ", ".join(proxy_groups) if proxy_groups else "NONE"
+                attempt     = retry_count + 1
+                attempt_str = (
+                    f" (attempt {attempt}/{total_attempts})" if total_attempts > 1 else ""
                 )
-            except CaptchaBlockedError:
-                if attempt >= total_attempts:
-                    err_msg = (
-                        f"Place {current_seq}/{len(place_urls)} blocked by DataDome after "
-                        f"{total_attempts} attempt(s) — IP pool may be temporarily flagged. "
-                        "This place will be skipped."
+
+                Actor.log.info(
+                    f"[{place_seq}/{total_places}] Processing: {place_url[:70]}..."
+                )
+                Actor.log.info(
+                    f"  proxy={proxy_groups_str} | session={_bs['session_id']} | "
+                    f"tz={_bs['session_tz']} [{_bs['session_src']}]{attempt_str}"
+                )
+
+                if retry_count > 0:
+                    # Exponential backoff: 3 s, 6 s, 12 s … with ±1 s jitter
+                    backoff = 3.0 * (2 ** (retry_count - 1)) + random.uniform(0.5, 1.5)
+                    Actor.log.info(
+                        f"  Backoff {backoff:.1f}s before retry attempt {attempt}/{total_attempts} …"
                     )
-                    Actor.log.error(f"  {err_msg}")
+                    await asyncio.sleep(backoff)
                     await Actor.set_status_message(
-                        f"Place {current_seq}/{len(place_urls)} — CAPTCHA FAILED, skipping"
+                        f"Place {place_seq}/{total_places} — Retrying (attempt {attempt}/{total_attempts}) …"
                     )
-                raise  # always re-raise so Crawlee can retry or mark failed
+                else:
+                    await Actor.set_status_message(
+                        f"Place {place_seq}/{total_places} — Loading …"
+                    )
 
-            if place_obj:
-                all_places.append(place_obj)
-            total_reviews_counter[0] += pushed
+                page = await _bs["context"].new_page()
+                try:
+                    place_obj, pushed = await scrape_place(
+                        page, place_url, max_reviews,
+                        has_proxy=apify_proxy_config is not None,
+                        start_date=start_date or None,
+                        end_date=end_date or None,
+                        rating_filters=rating_filters or None,
+                        language_filter=language_filter or None,
+                        place_idx=place_seq,
+                        total_places=total_places,
+                    )
+                    # ── Success ──────────────────────────────────────────────
+                    if place_obj:
+                        all_places.append(place_obj)
+                    total_reviews_counter[0] += pushed
 
-            # Brief inter-place delay to avoid hammering the server
-            delay = 2.0 + random.uniform(0.0, 1.0)
-            Actor.log.info(f"  Inter-place delay: {delay:.1f}s …")
-            await asyncio.sleep(delay)
+                    delay = 2.0 + random.uniform(0.0, 1.0)
+                    Actor.log.info(f"  Inter-place delay: {delay:.1f}s …")
+                    await asyncio.sleep(delay)
 
-        # Build request list with place_idx metadata
-        requests = [
-            Request.from_url(url, user_data={"place_idx": i + 1})
-            for i, url in enumerate(place_urls)
-        ]
-        await crawler.run(requests)
+                except CaptchaBlockedError:
+                    # ── Block handling ────────────────────────────────────────
+                    # Rotate browser IMMEDIATELY so all remaining places in the
+                    # queue (and the eventual retry) use the fresh context.
+                    if retry_count < max_retries:
+                        Actor.log.warning(
+                            f"  Blocked on place {place_seq} "
+                            f"(attempt {attempt}/{total_attempts}) — rotating proxy + browser …"
+                        )
+                        try: await page.close()
+                        except Exception: pass
+                        await _setup_browser(_bs["rotation"] + 1)
+                    else:
+                        Actor.log.error(
+                            f"  Place {place_seq}/{total_places} blocked by DataDome "
+                            f"after {total_attempts} attempt(s) — skipping."
+                        )
+                        await Actor.set_status_message(
+                            f"Place {place_seq}/{total_places} — CAPTCHA FAILED, skipping"
+                        )
+                    raise  # Crawlee handles retry scheduling or marks as failed
+
+                finally:
+                    try: await page.close()
+                    except Exception: pass  # already closed = fine
+
+            requests_list = [Request.from_url(url) for url in place_urls]
+            await crawler.run(requests_list)
+
+            # ── Cleanup browser ────────────────────────────────────────────────
+            if _bs["context"] is not None:
+                try: await _bs["context"].close()
+                except Exception: pass
+            if _bs["browser"] is not None:
+                try: await _bs["browser"].close()
+                except Exception: pass
 
         # ── Save Places.json / Places.md ─────────────────────────────────────
         if all_places:
