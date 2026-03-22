@@ -205,8 +205,8 @@ async def with_retry(coro_factory, max_retries: int = 3, base_delay: float = 2.0
 
 _TA_HOSTS = {"tripadvisor.com", "www.tripadvisor.com"}
 _TA_PLACE_PATH_RE = re.compile(
-    r"/(Hotel_Review|Restaurant_Review|Attraction_Review|VacationRentalReview|"
-    r"ShowUserReviews|Attraction_Review|geo\d+)-",
+    r"/(Hotel_Review|Restaurant_Review|Attraction_Review|AttractionProductReview|"
+    r"VacationRentalReview|ShowUserReviews|geo\d+)-",
     re.I,
 )
 
@@ -293,15 +293,28 @@ EXTRACT_PAGE_SCRIPT = r"""
     const result = { place: null, reviews: [] };
 
     // 1. JSON-LD (schema.org)
+    // Restaurants/attractions often wrap their data in an @graph array instead of
+    // a flat top-level object — flatten those before checking @type.
+    const _PLACE_TYPES = ['LodgingBusiness','Restaurant','FoodEstablishment',
+                          'TouristAttraction','LocalBusiness','Product','Service'];
+    function _typeMatch(t) {
+        if (!t) return false;
+        const types = Array.isArray(t) ? t : [t];
+        return types.some(v => _PLACE_TYPES.some(pt => String(v).includes(pt)));
+    }
     const ldScripts = document.querySelectorAll('script[type="application/ld+json"]');
     for (const s of ldScripts) {
         try {
             const d = JSON.parse(s.textContent);
-            const items = Array.isArray(d) ? d : [d];
+            const top = Array.isArray(d) ? d : [d];
+            // Flatten: push top-level items AND any nested @graph entries
+            const items = [];
+            for (const t of top) {
+                items.push(t);
+                if (Array.isArray(t['@graph'])) items.push(...t['@graph']);
+            }
             for (const item of items) {
-                if (item['@type'] && (item['@type'].includes('LodgingBusiness') ||
-                    item['@type'].includes('Restaurant') || item['@type'].includes('TouristAttraction') ||
-                    item['@type'].includes('LocalBusiness'))) {
+                if (_typeMatch(item['@type'])) {
                     result.place = item;
                     break;
                 }
@@ -310,13 +323,14 @@ EXTRACT_PAGE_SCRIPT = r"""
         if (result.place) break;
     }
 
-    // 2. __NEXT_DATA__ place info (if JSON-LD empty)
+    // 2. __NEXT_DATA__ place info (if JSON-LD empty or missing name)
     if (!result.place || !result.place.name) {
         try {
             const nd = JSON.parse(document.getElementById('__NEXT_DATA__').textContent);
             function findPlace(obj, depth) {
                 if (!obj || typeof obj !== 'object' || depth > 6) return null;
-                if (obj.name && obj.locationId && (obj.accommodationCategory || obj.restaurantCuisine !== undefined || obj.subtype)) return obj;
+                if (obj.name && obj.locationId && (obj.accommodationCategory ||
+                    obj.restaurantCuisine !== undefined || obj.subtype || obj.productType)) return obj;
                 for (const k of Object.keys(obj).slice(0, 30)) {
                     const r = findPlace(obj[k], depth + 1);
                     if (r) return r;
@@ -324,7 +338,28 @@ EXTRACT_PAGE_SCRIPT = r"""
                 return null;
             }
             const pl = findPlace(nd, 0);
-            if (pl && !result.place) result.place = { name: pl.name, locationId: pl.locationId };
+            if (pl && !result.place) {
+                // Extract as many fields as possible from __NEXT_DATA__ so
+                // parse_place_from_jsonld() can build a complete place object.
+                const rs = pl.reviewSummary || {};
+                const addr = pl.address || {};
+                result.place = {
+                    name: pl.name || '',
+                    locationId: pl.locationId,
+                    aggregateRating: {
+                        ratingValue: rs.rating || rs.ratingValue || '',
+                        reviewCount: rs.count || rs.reviewCount || pl.reviewCount || 0,
+                    },
+                    address: {
+                        streetAddress:  addr.street  || addr.streetAddress  || '',
+                        addressLocality: addr.city   || addr.addressLocality || '',
+                        addressRegion:  addr.state   || addr.addressRegion   || '',
+                        addressCountry: addr.country || addr.addressCountry  || '',
+                    },
+                    priceRange: pl.priceRange || pl.priceLevel || pl.priceLevelStr || '',
+                    image: pl.image || '',
+                };
+            }
         } catch(e) {}
     }
 
@@ -604,7 +639,7 @@ def parse_review_from_graphql(data: list) -> list[dict]:
 
 PARALLEL_REQUESTS = 40
 REVIEWS_PER_PAGE = 10
-PUSH_BATCH_SIZE = 100
+PUSH_BATCH_SIZE = 300
 
 
 REVIEWS_QUERY_ID = "ef1a9f94012220d3"  # ReviewsProxy_getReviewListPageForLocation
@@ -737,7 +772,7 @@ async def scrape_place(
             await route.abort()
         else:
             await route.continue_()
-    #await page.route("**/*", _block_resources)
+    await page.route("**/*", _block_resources)
 
     captcha_detected = asyncio.Event()
 
@@ -1035,10 +1070,16 @@ async def scrape_place(
         await _push_batch(reviews)
 
     if total_pushed == 0:
-        Actor.log.warning(
-            "  No reviews captured. TripAdvisor may be blocking. "
-            "Try enabling Apify Residential Proxy."
-        )
+        if graphql_responses:
+            Actor.log.info(
+                "  No reviews matched the applied filters "
+                "(date range, rating, or language)."
+            )
+        else:
+            Actor.log.warning(
+                "  No reviews captured. TripAdvisor may be blocking. "
+                "Try enabling Apify Residential Proxy."
+            )
 
     place_obj = _normalize_place(place_obj, url=landed_url, loc_id=loc_id)
     place_obj["scrapedReviews"] = total_pushed
@@ -1424,13 +1465,23 @@ async def main() -> None:
             )
 
         if total_reviews_counter[0] == 0 and place_urls:
-            fail_msg = (
-                f"Failed — 0 reviews scraped for {len(place_urls)} place(s). "
-                "All requests were blocked or timed out. "
-                "Check your proxy configuration and retry."
-            )
-            Actor.log.error(fail_msg)
-            await Actor.fail(status_message=fail_msg)
+            if all_places:
+                filter_msg = (
+                    f"Finished — {len(all_places)} place(s) scraped, "
+                    "0 reviews matched the applied filters "
+                    "(date range, rating, or language). "
+                    "Try adjusting or removing your filters."
+                )
+                Actor.log.info(filter_msg)
+                await Actor.exit(status_message=filter_msg)
+            else:
+                fail_msg = (
+                    f"Failed — 0 reviews scraped for {len(place_urls)} place(s). "
+                    "All requests were blocked or timed out. "
+                    "Check your proxy configuration and retry."
+                )
+                Actor.log.error(fail_msg)
+                await Actor.fail(status_message=fail_msg)
             return
 
         final_msg = (

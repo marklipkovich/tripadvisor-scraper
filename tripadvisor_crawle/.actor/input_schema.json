@@ -26,18 +26,20 @@
 		"startDate": {
 			"title": "Start Date",
 			"type": "string",
-			"description": "Only include reviews published on or after this date (YYYY-MM-DD). Leave empty for all reviews.",
+			"description": "Only include reviews published on or after this date (YYYY-MM-DD). Leave empty for all reviews. Must be on or before End Date.",
 			"default": "",
 			"editor": "datepicker",
-			"dateType": "absolute"
+			"dateType": "absolute",
+			"pattern": "^(\\d{4}-\\d{2}-\\d{2})?$"
 		},
 		"endDate": {
 			"title": "End Date",
 			"type": "string",
-			"description": "Only include reviews published on or before this date (YYYY-MM-DD). Leave empty for all reviews.",
+			"description": "Only include reviews published on or before this date (YYYY-MM-DD). Leave empty for all reviews. Must be on or after Start Date.",
 			"default": "",
 			"editor": "datepicker",
-			"dateType": "absolute"
+			"dateType": "absolute",
+			"pattern": "^(\\d{4}-\\d{2}-\\d{2})?$"
 		},
 		"reviewRatings": {
 			"title": "Review Ratings",
