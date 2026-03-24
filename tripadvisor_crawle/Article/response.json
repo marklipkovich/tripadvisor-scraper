@@ -1,0 +1,91 @@
+[
+    {
+        "data": {
+            "ReviewsProxy_getReviewListPageForLocation": [
+                {
+                    "preferredReviewIds": [],
+                    "totalCount": 1004,
+                    "reviews": [
+                        {
+                            "id": 1044599990,
+                            "status": "PUBLISHED",
+                            "reviewDetailPageWrapper": {
+                                "reviewDetailPageRoute": {
+                                    "url": "/ShowUserReviews-g190327-d264936-r1044599990-1926_Le_Soleil_Hotel_Spa-Sliema_Island_of_Malta.html"
+                                }
+                            },
+                            "location": {
+                                "locationId": 264936,
+                                "name": "1926 Le Soleil Hotel & Spa",
+                                "url": "/Hotel_Review-g190327-d264936-Reviews-1926_Le_Soleil_Hotel_Spa-Sliema_Island_of_Malta.html",
+                                "placeType": "ACCOMMODATION",
+                                "accommodationCategory": "HOTEL",
+                                "businessAdvantageData": null
+                            },
+                            "createdDate": "2026-01-02",
+                            "publishedDate": "2026-01-08",
+                            "userProfile": {
+                                "id": "19EFB5A940FE5D400677CA9E15FF6C87",
+                                "isVerified": false,
+                                "displayName": "Valentina",
+                                "username": "Valentinamatisse",
+                                "avatar": {
+                                    "__typename": "MemberProfile_MediaId",
+                                    "data": {
+                                        "__typename": "Media_PhotoResult",
+                                        "id": 452390812,
+                                        "photoSizeDynamic": {
+                                            "urlTemplate": "https://dynamic-media-cdn.tripadvisor.com/media/photo-o/1a/f6/ef/9c/default-avatar-2020-14.jpg?w={width}&h={height}&s=1",
+                                            "maxHeight": 1200,
+                                            "maxWidth": 1200
+                                        }
+                                    }
+                                },
+                                "hometown": {
+                                    "locationId": null,
+                                    "fallbackString": null,
+                                    "location": null
+                                },
+                                "route": {
+                                    "url": "/Profile/Valentinamatisse"
+                                },
+                                "contributionCounts": {
+                                    "sumAllUgc": 6
+                                }
+                            },
+                            "rating": 5,
+                            "publishPlatform": null,
+                            "title": "Pleasant experience and professional staff",
+                            "language": "en",
+                            "originalLanguage": "it",
+                            "text": "Very nice hotel with a lot of potential but the services offered have reserved us some surprises. The location is very nice, the deluxe rooms are quite large and the breakfast is good (15 euros per person if not included in the overnight price).\nCleanliness of the rooms was initially approximate.\nThe two pools available, one in the spa and one on the rooftop, did not have the temperature that was indicated in the hotel description. They then explained that they had experienced technical problems.\nThe spa is not very large and can hold about 10 people to maintain a comfortable situation.\nWe decided to do the Roman route in the building in front (also of the hotel) with pools of heated water at different temperatures but it is a service that is given to you for a fee.\nOur choice of hotel had been made especially for the services.\nAfter writing to the hotel, reporting the various situations observed, the staff immediately took action to try to understand and come against us. I have to put a positive note to the reception manager, Mr. Ra Patrizia, who was very keen to meet x a confrontation and make us directly her apology for what happened. You can see in the staff the utmost attention and care that is given to customers and any observation or report that is made, trying in every way to solve the problem or find alternatives.\nAlso all the staff was attentive and helpful in every aspect.\nThe rooms were cleaned with further inspection by an attendant and offered us options x apologize for the inconveniences.\nWe also carried out treatments at the spa (e.g. winter wonderland). Beautiful experience with two masseurs (a man and a woman) very professional and very good. Congratulations, really.\nWe thank all the staff for the pleasant holiday in Malta",
+                            "username": null,
+                            "connectionToSubject": null,
+                            "mgmtResponse": {
+                                "id": 1048923007,
+                                "text": "Dear Valentina,\n\nThank you for taking the time to share your detailed feedback regarding your recent stay at 1926 Le Soleil Hotel & Spa. We are delighted to learn that you appreciated our beautiful location, the spaciousness of the deluxe rooms, and the quality of our breakfast offerings. Furthermore, your kind words regarding the professionalism and attentiveness of our staff, particularly Ms. Patrizia and the spa team, are truly valued.\n\nWe also acknowledge your observations concerning the initial standards of room cleanliness, the temperature of the pools, and the size and services of the spa. Please rest assured that your constructive comments have been duly noted, and we are committed to ongoing enhancements in order to provide a consistently high level of service for our guests.\n\nYour feedback is invaluable to us as we strive for continuous improvement. We would be pleased to welcome you again in the future, and we hope to have another opportunity to exceed your expectations.\n\nSincerely,  \nGiorgia F.  \nHospitality Team – 1926 Collection",
+                                "language": "en",
+                                "translationType": null,
+                                "publishedDate": "2026-02-08",
+                                "connectionToSubject": "Owner",
+                                "userProfile": {
+                                    "userId": "E4B3546073D9F51B7C88EC1866968199",
+                                    "displayName": "Guest Care Team",
+                                    "route": {
+                                        "url": "/Profile/guestcare1926"
+                                    },
+                                    "avatar": {
+                                        "__typename": "MemberProfile_MediaId",
+                                        "data": {
+                                            "__typename": "Media_PhotoResult",
+                                            "id": 777266799,
+                                            "photoSizeDynamic": {
+                                                "urlTemplate": "https://dynamic-media-cdn.tripadvisor.com/media/photo-o/2e/54/26/6f/50guestc.jpg?w={width}&h={height}&s=1",
+                                                "maxHeight": 1706,
+                                                "maxWidth": 1706
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                           

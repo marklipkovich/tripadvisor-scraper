@@ -1,0 +1,10 @@
+curl 'https://www.tripadvisor.com/data/graphql/ids' \
+  -H 'accept: */*' \
+  -H 'accept-language: en-US,en;q=0.9,ru;q=0.8' \
+  -H 'cache-control: no-cache' \
+  -H 'content-type: application/json' \
+   .....................................
+  -H 'origin: https://www.tripadvisor.com' \
+  -H 'pragma: no-cache' \
+  -H 'priority: u=1, i' \
+  -H 'referer: https://www.tripadvisor.com/Hotel_Review-g190327-d264936-Reviews-1926_Le_Soleil_Hotel_Spa-Sliema_Island_of_Malta.html' \

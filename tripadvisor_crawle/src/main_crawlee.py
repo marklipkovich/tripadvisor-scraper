@@ -27,7 +27,7 @@ Architecture: PlaywrightCrawler + CamoufoxPlugin (shared browser+context).
        retry_count) so the fresh context gets a different residential IP.
 
   What we still manage manually (unchanged from main.py):
-    • Captcha detection & 12-second polling window
+    • Captcha detection & 15-second polling window
     • GraphQL parallel fetches (40 × asyncio.gather)
     • Review parsing & dataset push batching
     • All data extraction logic
@@ -77,12 +77,25 @@ class CamoufoxPlugin(PlaywrightBrowserPlugin):
 
     browser_state is a mutable dict shared with handle_place so the handler
     knows when a new browser has been launched and can log the session details.
-    Keys: needs_log (bool), vp (dict).
+    Keys: needs_log (bool), vp (dict), session_tz, session_src, exit_ip, exit_country.
+
+    proxy_url_getter is an optional async callable (() -> str | None) that
+    returns the current session's proxy URL.  When provided:
+      • The URL is passed to Camoufox as geoip=<url> so the browser's timezone,
+        geolocation, and related fingerprint fields are automatically set to
+        match the proxy's exit IP — eliminating the mismatch that DataDome and
+        similar bot-protection systems detect.
+      • A lightweight IP-info probe (_probe_proxy_timezone) is run concurrently
+        with the browser launch so we get the "Proxy exit IP" log line without
+        adding extra round-trip latency.
     """
 
-    def __init__(self, *, browser_state: dict, **kwargs: Any) -> None:
+    def __init__(
+        self, *, browser_state: dict, proxy_url_getter: Any = None, **kwargs: Any
+    ) -> None:
         super().__init__(**kwargs)
         self._browser_state = browser_state
+        self._proxy_url_getter = proxy_url_getter
 
     @override
     async def new_browser(self) -> PlaywrightBrowserController:
@@ -90,6 +103,11 @@ class CamoufoxPlugin(PlaywrightBrowserPlugin):
             raise RuntimeError("Playwright browser plugin is not initialized.")
         vp = random.choice(VIEWPORTS)
         is_headless = _os.environ.get("APIFY_IS_AT_HOME") == "1"
+
+        proxy_url: str | None = None
+        if self._proxy_url_getter is not None:
+            proxy_url = await self._proxy_url_getter()
+
         launch_options: dict = {
             "os": "windows",
             "block_webrtc": True,
@@ -97,12 +115,45 @@ class CamoufoxPlugin(PlaywrightBrowserPlugin):
             **self._browser_launch_options,
         }
         launch_options["headless"] = is_headless
-        # Signal to handle_place that a fresh browser was just launched so it
-        # can probe the proxy and emit the "Launching browser" log line.
-        self._browser_state["vp"] = vp
-        self._browser_state["needs_log"] = True
+        if proxy_url:
+            # Probe the proxy exit IP first — Camoufox's geoip parameter expects a
+            # plain IP address string (e.g. "177.97.200.207"), NOT a proxy URL.
+            # We need the exit IP before we can set geoip=, so probing is sequential.
+            probe_tz, probe_src, probe_ip, probe_country = (
+                await _probe_proxy_timezone(proxy_url)
+            )
+            if probe_ip != "?":
+                # Pass the actual exit IP so Camoufox looks it up in the local
+                # MaxMind database and auto-configures timezone, geolocation, etc.
+                launch_options["geoip"] = probe_ip
+
+            try:
+                browser = await AsyncNewBrowser(self._playwright, **launch_options)
+            except Exception as exc:
+                exc_name = type(exc).__name__
+                if exc_name in ("NotInstalledGeoIPExtra", "InvalidIP"):
+                    Actor.log.warning(
+                        f"  camoufox geoip unavailable ({exc_name}) — "
+                        "launching without geoip (timezone will not match proxy)."
+                    )
+                    launch_options.pop("geoip", None)
+                    browser = await AsyncNewBrowser(self._playwright, **launch_options)
+                else:
+                    raise
+        else:
+            probe_tz, probe_src, probe_ip, probe_country = (
+                _DEFAULT_TIMEZONE, "no-proxy", "?", "?"
+            )
+            browser = await AsyncNewBrowser(self._playwright, **launch_options)
+
+        # Cache probe results so handle_place can log them without a second call.
+        self._browser_state.update(
+            vp=vp, needs_log=True,
+            session_tz=probe_tz, session_src=probe_src,
+            exit_ip=probe_ip, exit_country=probe_country,
+        )
         return PlaywrightBrowserController(
-            browser=await AsyncNewBrowser(self._playwright, **launch_options),
+            browser=browser,
             # Camoufox generates its own headers — disable Crawlee's generator.
             header_generator=None,
         )
@@ -942,10 +993,10 @@ async def scrape_place(
         Actor.log.info("  Page ready — continuing")
         await Actor.set_status_message(f"Place {place_idx}/{total_places} — Scraping reviews …")
 
-    # Poll up to 12 s for Camoufox to auto-resolve DataDome captcha
+    # Poll up to 15 s for Camoufox to auto-resolve DataDome captcha
     if captcha_seen:
         captcha_resolved = False
-        for _ in range(12):
+        for _ in range(15):
             await asyncio.sleep(1.0)
             try:
                 still_here = await page.locator(
@@ -961,7 +1012,7 @@ async def scrape_place(
             captcha_seen = False
             captcha_was_resolved = True
         else:
-            Actor.log.warning("  Captcha not resolved after 12s — raising for Crawlee retry")
+            Actor.log.warning("  Captcha not resolved after 15s — raising for Crawlee retry")
             # Crawlee catches this, rotates proxy/session, and retries the URL
             raise CaptchaBlockedError("DataDome captcha not bypassed with current proxy")
 
@@ -1272,13 +1323,16 @@ async def main() -> None:
         # Firefox/Camoufox supports via Playwright's browser.new_context(proxy=...).
         apify_proxy_config = None
         crawlee_proxy_config = None
+        # Async callable (() -> str | None) passed to CamoufoxPlugin for geoip.
+        # Set below once we know a valid proxy configuration exists.
+        _proxy_url_for_geoip: Any = None
         proxy_groups = (proxy_input or {}).get("apifyProxyGroups") or []
         is_residential = any("RESIDENTIAL" in (g or "").upper() for g in proxy_groups)
         proxy_country = ((proxy_input or {}).get("apifyProxyCountry") or "").strip().upper()
 
         # _session_rotation[0] is the global rotation counter (incremented on each
-        # browser rotation after a block).  Both _get_proxy_url and the logging
-        # probe in handle_place read this so they always use the same session ID.
+        # browser rotation after a block).  Both _get_proxy_url and CamoufoxPlugin
+        # read this so they always use the same session ID.
         _session_rotation = [0]
 
         if proxy_input:
@@ -1299,6 +1353,10 @@ async def main() -> None:
                         return f"{info.scheme}://{info.username}:{info.password}@{info.hostname}:{info.port}"
                     return None
 
+                # Share the same getter with CamoufoxPlugin so geoip probes through
+                # the correct residential session (same URL Crawlee uses for contexts).
+                _proxy_url_for_geoip = _get_proxy_url
+
                 crawlee_proxy_config = CrawleeProxyConfiguration(new_url_function=_get_proxy_url)
             else:
                 Actor.log.warning(
@@ -1311,17 +1369,13 @@ async def main() -> None:
                 "regardless of browser fingerprint — enable Residential Proxy in the input."
             )
 
-        if proxy_country and proxy_country in COUNTRY_TIMEZONES:
+        if apify_proxy_config is not None:
             Actor.log.info(
-                f"Proxy country: {proxy_country} → timezone will use static mapping "
-                "(auto-detected via ipinfo.io when country not set)"
-            )
-        elif apify_proxy_config is not None:
-            Actor.log.info(
-                "Proxy country not set — timezone will be auto-detected per session via ipinfo.io"
+                "Browser geoip: timezone, geolocation, and fingerprint will be "
+                "auto-matched to the proxy exit IP via camoufox geoip"
             )
         else:
-            Actor.log.info(f"No proxy — browser timezone display: {_DEFAULT_TIMEZONE} (default)")
+            Actor.log.info(f"No proxy — browser timezone: {_DEFAULT_TIMEZONE} (default)")
 
         # Without residential proxy datacenter IPs are always blocked by DataDome —
         # no point retrying with the same IP, fail immediately after first attempt.
@@ -1373,7 +1427,10 @@ async def main() -> None:
         # page was *opened* (not closed), so a 45-second scrape exceeds the 10-second
         # default threshold and causes a new browser to be launched for every place.
         browser_pool = BrowserPool(
-            plugins=[CamoufoxPlugin(browser_state=browser_state)],
+            plugins=[CamoufoxPlugin(
+                browser_state=browser_state,
+                proxy_url_getter=_proxy_url_for_geoip,
+            )],
             browser_inactive_threshold=timedelta(minutes=30),
             identify_inactive_browsers_interval=timedelta(minutes=30),
         )
@@ -1405,63 +1462,35 @@ async def main() -> None:
             total_places = len(place_urls)
 
             # ── Session log (emitted for every place and every retry) ───────
-            # On new browser launch (needs_log=True): probe the proxy to get the
-            # real exit IP + timezone, update the cache, and log "Launching browser:".
-            # On reused browser (needs_log=False): re-log the cached values so
-            # every place shows proxy + session information in the output.
+            # new_browser() already ran the proxy probe and cached the results in
+            # browser_state (probe + geoip browser launch ran concurrently there).
+            # Here we just read the cache and log — no extra HTTP round-trip.
             session_id = f"run_s{_session_rotation[0] + 1}"
-            vp = browser_state["vp"]
+            vp          = browser_state["vp"]
+            session_tz  = browser_state["session_tz"]
+            session_src = browser_state["session_src"]
+            exit_ip     = browser_state["exit_ip"]
+            exit_country = browser_state["exit_country"]
 
             if browser_state["needs_log"]:
-                if apify_proxy_config is not None:
-                    _info = await apify_proxy_config.new_proxy_info(session_id=session_id)
-                    if _info:
-                        _proxy_url_str = (
-                            f"{_info.scheme}://{_info.username}:"
-                            f"{_info.password}@{_info.hostname}:{_info.port}"
-                        )
-                        if proxy_country and proxy_country in COUNTRY_TIMEZONES:
-                            session_tz   = random.choice(COUNTRY_TIMEZONES[proxy_country])
-                            session_src  = f"mapping:{proxy_country}"
-                            exit_ip      = "?"
-                            exit_country = proxy_country
-                        else:
-                            session_tz, session_src, exit_ip, exit_country = (
-                                await _probe_proxy_timezone(_proxy_url_str)
-                            )
-                    else:
-                        session_tz, session_src = _DEFAULT_TIMEZONE, "no-proxy-info"
-                        exit_ip, exit_country = "?", "?"
-                else:
-                    session_tz, session_src = _DEFAULT_TIMEZONE, "no-proxy"
-                    exit_ip, exit_country = "?", "?"
-
-                browser_state.update(
-                    session_tz=session_tz, session_src=session_src,
-                    session_id=session_id,
-                    exit_ip=exit_ip, exit_country=exit_country,
-                    needs_log=False,
-                )
+                # New browser — "Proxy exit IP:" was already logged by
+                # _probe_proxy_timezone inside new_browser(); log "Launching browser:".
+                browser_state.update(needs_log=False, session_id=session_id)
                 Actor.log.info(
-                    f"  Launching browser: os=windows | tz={session_tz} [{session_src}] | "
+                    f"  Launching browser: os=windows | tz={session_tz} [geoip+{session_src}] | "
                     f"{vp['width']}×{vp['height']} | session={session_id}"
                 )
             else:
-                # Reused browser — show cached proxy + session info for visibility
-                session_tz   = browser_state["session_tz"]
-                session_src  = browser_state["session_src"]
-                session_id   = browser_state["session_id"]
-                exit_ip      = browser_state["exit_ip"]
-                exit_country = browser_state["exit_country"]
+                # Reused browser — re-log cached values for per-place visibility.
+                session_id = browser_state["session_id"]
                 if exit_ip != "?":
-                    # Only log "Proxy exit IP:" when we have a real probed IP
                     svc = session_src.split(":")[0]
                     Actor.log.info(
                         f"  Proxy exit IP: {exit_ip} | country={exit_country} | "
                         f"timezone={session_tz} ({svc})"
                     )
                 Actor.log.info(
-                    f"  Browser session: os=windows | tz={session_tz} [{session_src}] | "
+                    f"  Browser session: os=windows | tz={session_tz} [geoip+{session_src}] | "
                     f"{vp['width']}×{vp['height']} | session={session_id}"
                 )
 

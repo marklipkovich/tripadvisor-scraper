@@ -1,0 +1,52 @@
+[
+    {
+      "variables": {
+        "locationId": 264936,
+        "filters": [
+          {
+            "axis": "LANGUAGE",
+            "selections": [
+              "en"
+            ]
+          }
+        ],
+        "limit": 10,
+        "offset": 10,
+        "sortType": null,
+        "sortBy": "SERVER_DETERMINED",
+        "language": "en",
+        "doMachineTranslation": true,
+        "photosPerReviewLimit": 3
+      },
+      "extensions": {
+        "preRegisteredQueryId": "ef1a9f94012220d3"
+      }
+    },
+    {
+      "variables": {
+        "routesRequest": [
+          {
+            "fragment": "",
+            "page": "Hotel_Review",
+            "params": {
+              "geoId": 190327,
+              "detailId": 264936,
+              "offset": 0
+            }
+          },
+          {
+            "fragment": "",
+            "page": "Hotel_Review",
+            "params": {
+              "geoId": 190327,
+              "detailId": 264936,
+              "offset": "r10"
+            }            
+          }
+        ]
+      },
+      "extensions": {
+        "preRegisteredQueryId": "3f2df7139a71a643"
+      }
+    }
+  ]

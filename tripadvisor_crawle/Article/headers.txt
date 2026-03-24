@@ -1,0 +1,12 @@
+authority
+www.tripadvisor.com
+:method
+POST
+:path
+/data/graphql/ids
+content-type
+application/json
+origin
+https://www.tripadvisor.com
+referer
+https://www.tripadvisor.com/Hotel_Review-g190327-d264936-Reviews-1926_Le_Soleil_Hotel_Spa-Sliema_Island_of_Malta.html

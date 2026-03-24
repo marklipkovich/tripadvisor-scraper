@@ -1,0 +1,8 @@
+{
+  "startUrls": [
+    { "url": "https://www.tripadvisor.com/Hotel_Review-g190327-d264936-Reviews-1926_Le_Soleil_Hotel_Spa-Sliema_Island_of_Malta.html" },
+    { "url": "https://www.tripadvisor.com/Hotel_Review-g190327-d264939-Reviews-The_Waterfront_Hotel-Sliema_Island_of_Malta.html" }
+  ],
+  "maxReviewsPerPlace": 300,
+  "proxyConfiguration": { "useApifyProxy": false }
+}
