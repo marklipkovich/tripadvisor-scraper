@@ -1,6 +1,6 @@
 """
 TripAdvisor Reviews Scraper — Crawlee Edition
-══════════════════════════════════════════════════════════════════════════════
+═════════════════════════════════════════════════════════════════════════════
 
 Architecture: PlaywrightCrawler + CamoufoxPlugin (shared browser+context).
 
