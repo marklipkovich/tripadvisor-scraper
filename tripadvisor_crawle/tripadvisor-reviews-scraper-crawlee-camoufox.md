@@ -1,6 +1,7 @@
 ---
 slug: tripadvisor-reviews-scraper-python-crawlee-camoufox
 title: How to scrape TripAdvisor reviews with Python, Crawlee, and Camoufox
+description: Scrape TripAdvisor reviews with Python, Crawlee, and Camoufox. Bypass DataDome using stealth Firefox, GeoIP matching, and parallel GraphQL fetching.
 authors:
   - name: Mark
     title: Apify community developer specializing in high-fidelity data extraction for ML/AI training, automation, and data analysis. Published scrapers on the Apify Store include this Actor and a YouTube Transcript Scraper, with more extraction tools in development.
@@ -31,7 +32,11 @@ An Apify Actor that accepts one or more TripAdvisor place URLs (hotels, restaura
 - **Places dataset** — metadata: name, rating, address, total review count, price range, image URL
 - **Reviews dataset** — individual reviews: title, text, rating, date, traveler type, reviewer name, helpful votes, management response
 
-The Actor uses Crawlee's `PlaywrightCrawler` with a custom `CamoufoxPlugin` to launch Camoufox (a fingerprint-evasion Firefox fork) instead of standard Playwright browsers. Reviews are fetched directly from TripAdvisor's internal GraphQL API using 50 parallel `asyncio.gather()` calls per pagination batch — fast, structured, and not dependent on DOM layout.
+The Actor uses Crawlee's [`PlaywrightCrawler`](https://crawlee.dev/python/docs/guides/playwright-crawler) with a custom `CamoufoxPlugin` to launch Camoufox (a fingerprint-evasion Firefox fork) instead of standard Playwright browsers. Reviews are fetched directly from TripAdvisor's internal GraphQL API using 50 parallel `asyncio.gather()` calls per pagination batch — fast, structured, and not dependent on DOM layout.
+
+:::note
+If you find this article useful, consider starring [Crawlee for Python on GitHub](https://github.com/apify/crawlee-python). It helps spread the word to other scraper developers.
+:::
 
 ## Step 1: Inspect TripAdvisor with DevTools before writing any code
 
@@ -50,7 +55,7 @@ Here's exactly what to do:
 
 Click any large request. In the **Response** tab you'll see review text matching what's on screen — "Very nice hotel…" — confirming this is the right endpoint.
 
-![DevTools Response tab showing review JSON data](./tripadvisor-reviews-scraper-python-crawlee-camoufox-images/devtools-tripadvisor-network-response.png)
+![DevTools Response tab showing TripAdvisor GraphQL review JSON data](./tripadvisor-reviews-scraper-python-crawlee-camoufox-images/devtools-tripadvisor-network-response.png)
 
 Right-click the request → **Copy → Copy as cURL**. This gives you the full URL, all headers, and the exact JSON payload in one shot.
 
@@ -455,7 +460,7 @@ After switching to Camoufox with a residential proxy, the captcha stopped appear
 
 ## Step 6: Integrating Camoufox into Crawlee
 
-Crawlee's `PlaywrightCrawler` uses a `BrowserPool` to manage browser lifecycle. To use Camoufox instead of standard Playwright browsers, I subclassed `PlaywrightBrowserPlugin` and overrode `new_browser()`:
+Crawlee's `PlaywrightCrawler` uses a `BrowserPool` to manage browser lifecycle. Crawlee has a guide on [avoiding getting blocked](https://crawlee.dev/python/docs/guides/avoid-blocking) that covers fingerprinting, headers, and proxy use — but for DataDome specifically, I needed to go further and replace the browser entirely. To use Camoufox instead of standard Playwright browsers, I subclassed `PlaywrightBrowserPlugin` and overrode `new_browser()`:
 
 ```python
 from crawlee.browsers import BrowserPool, PlaywrightBrowserController, PlaywrightBrowserPlugin
@@ -663,7 +668,7 @@ browser_pool = BrowserPool(
 
 After this change, the same browser and proxy IP served all places throughout the run:
 
-![Log showing the same proxy IP and session used consistently for all places](./tripadvisor-reviews-scraper-python-crawlee-camoufox-images/same-proxy-browser-geoip.png)
+![Apify Actor log showing the same proxy IP and Camoufox browser session reused across all TripAdvisor places](./tripadvisor-reviews-scraper-python-crawlee-camoufox-images/same-proxy-browser-geoip.png)
 
 ### Match browser timezone and locale to the proxy's exit IP (GeoIP)
 
@@ -804,10 +809,10 @@ The Actor accepts these input fields:
 | `endDate` | string | Filter: only reviews on or before this date (YYYY-MM-DD) |
 | `reviewRatings` | array | Filter by star rating: [1], [5], [3,4,5], etc. |
 | `language` | string | Filter by review language code (e.g. `en`, `de`, `fr`) |
-| `proxyConfiguration` | object | Apify proxy settings — use Residential Proxy for reliable bypassing |
+| `proxyConfiguration` | object | [Apify Proxy](https://docs.apify.com/platform/proxy) settings — use Residential Proxy for reliable bypassing |
 
 :::note
-Without residential proxy, DataDome blocks datacenter IPs regardless of browser fingerprint. Camoufox handles fingerprint detection, but residential proxy is required on Apify Cloud for consistent results.
+Without residential proxy, DataDome blocks datacenter IPs regardless of browser fingerprint. Camoufox handles fingerprint detection, but [residential proxy](https://docs.apify.com/platform/proxy/residential-proxy) is required on Apify Cloud for consistent results.
 :::
 
 ## Conclusion
@@ -826,4 +831,4 @@ A few things I learned — and would do differently next time:
 
 **Use `geoip=True` and pass the proxy at browser launch, not context creation.** Camoufox needs the proxy's exit IP before the browser starts, so it can align timezone, geolocation, and locale to the residential IP. If you only set the proxy on `new_context()` — which is Crawlee's default — Camoufox's early IP lookup goes through the server's own network, producing a timezone/locale mismatch that DataDome flags immediately.
 
-The full code is available on [Apify Store](#). Questions or improvements? Join the [Crawlee Discord](https://discord.com/invite/jyEM2PRvMU) — 11,000+ developers working through exactly these kinds of problems.
+You can find the full Actor code in the [GitHub repository](#) and the deployed version on the [Apify Store](#). Questions or improvements? Join the [Crawlee Discord](https://discord.com/invite/jyEM2PRvMU) — 11,000+ developers working through exactly these kinds of problems.
