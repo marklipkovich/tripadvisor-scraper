@@ -1,50 +1,25 @@
-# apify/actor-python-playwright:3.12 is required (not actor-python:3.12) because
-# Camoufox/Firefox needs system libraries (libgtk, libdbus, libX11, etc.) that
-# are only present in the playwright variant.
+# Following Apify's official camoufox pattern (github.com/apify/actor-camoufox-scraper):
+# - Use actor-python-playwright (NOT the camoufox variant)
+# - Install camoufox via pip, then run `python -m camoufox fetch` as myuser
+# - No USER root / XDG_CACHE_HOME / chmod needed: the base image already
+#   runs as myuser, so the binary lands in /home/myuser/.cache/camoufox/
+#   which myuser can always read at runtime.
 FROM apify/actor-python-playwright:3.12
 
-# Pin the Camoufox binary to a fixed path that does not depend on HOME.
-# Without this, camoufox looks in ~/.cache at runtime, which may differ from
-# the build-time HOME, causing it to re-download the ~700 MB binary every run.
-ENV XDG_CACHE_HOME=/opt/camoufox-cache
-
-# Install Camoufox and fetch its Firefox binary as root, in a dedicated layer
-# BEFORE requirements.txt so the ~700 MB download is cached and skipped on
-# subsequent builds unless CAMOUFOX_VER changes.
-# chmod 755 makes the binary readable by myuser at runtime.
-USER root
-ARG CAMOUFOX_VER=0.4.11
-RUN pip install --no-cache-dir "camoufox==${CAMOUFOX_VER}" \
- && python -m camoufox fetch \
- && chmod -R 755 /opt/camoufox-cache
-
-USER myuser
-
-# Second, copy just requirements.txt into the Actor image,
-# since it should be the only file that affects the dependency install in the next step,
-# in order to speed up the build
+# Copy requirements first for better layer caching.
 COPY --chown=myuser:myuser requirements.txt ./
-
-# Install the packages specified in requirements.txt,
-# Print the installed Python version, pip version
-# and all installed packages with their versions for debugging
 RUN echo "Python version:" \
  && python --version \
- && echo "Pip version:" \
- && pip --version \
  && echo "Installing dependencies:" \
  && pip install --no-cache-dir -r requirements.txt \
  && echo "All installed Python packages:" \
  && pip freeze
 
-# Next, copy the remaining files and directories with the source code.
-# Since we do this after installing the dependencies, quick build will be really fast
-# for most source file changes.
-COPY --chown=myuser:myuser . ./
+# Fetch the Camoufox Firefox binary as myuser.
+# Binary is stored in /home/myuser/.cache/camoufox/ — readable at runtime.
+RUN python -m camoufox fetch
 
-# Use compileall to ensure the runnability of the Actor Python code.
+COPY --chown=myuser:myuser . ./
 RUN python3 -m compileall -q src/
 
-# Specify how to launch the source code of your Actor.
-# By default, the "python3 -m ." command is run
 CMD ["python3", "-m", "src"]

@@ -1,0 +1,6 @@
+await asyncio.sleep(random.uniform(1.0, 2.0))   # after initial load path
+# …
+await asyncio.sleep(random.uniform(0.5, 1.0))  # after Reviews tab click
+await asyncio.sleep(random.uniform(0.5, 1.0))  # after scroll
+# …
+await asyncio.sleep(random.uniform(0.8, 1.5))  # between GraphQL pagination rounds
