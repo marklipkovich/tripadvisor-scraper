@@ -1,0 +1,239 @@
+In this article, we will learn how to scrape tripadvisor.com, get information about places (hotels, restaurants, etc.) and customer reviews, using Crawlee, create Actor on Apify, optimize performance, and consider anti-blocking measures 
+
+Simple step-by-step procedure (how we get reviews)
+1. Load the place page
+Use Playwright/Chromium to open the TripAdvisor place URL (page.goto())
+During load, the page makes GraphQL calls (place info, first reviews, etc.).
+https://graphql.org
+page.on("response", on_response) captures those JSON responses into graphql_responses.
+2. Wait for the page and handle captcha
+Wait for the Reviews tab to appear.
+If a captcha appears, wait and/or retry until it’s resolved.
+3. Click the Reviews tab so the page switches to reviews.
+4. Fetch reviews via the GraphQL API 
+Read the place ID (e.g. 264936) from the URL.
+Use JavaScript inside the page to call the GraphQL API with different offsets 
+First batch: offsets 0, 10, 20, 30, …, 390 (40 parallel requests).
+Each request returns 10 reviews in JSON.
+Use page.evaluate() so the request runs in the browser context and uses its cookies.
+Insert page_evaluate.py
+
+5. Parse the JSON responses into review objects (text, rating, date, author, etc.) 
+6. Push them to the Apify dataset in batches.
+7. Advance the offset and repeat until you reach the desired total or the API returns fewer than 10 reviews (meaning the end of reviews for that place).
+
+Obtaining JSON directly from the GraphQL API via fetch() in the browser (with offset pagination) has the following advantages over copying or parsing HTML.
+•	Clean data: JSON is structured and easier to parse than HTML; avoids fragile selectors.
+•	Performance: Parallel batches (e.g. 50 concurrent requests) 
+•	Lower load:	Only fetches review JSON, no need to load or scroll full HTML pages.
+•	Stability: Less dependent on DOM structure; TripAdvisor can change HTML without breaking the API.
+•	Scalability:	Can go beyond a few hundred reviews; no arbitrary hard cap from HTML pagination.
+
+Let's inspect the TripAdvisor page with DevTools first
+1.	Open page https://www.tripadvisor.com/Hotel_Review-g190327-d264939-Reviews-The_Waterfront_Hotel-Sliema_Island_of_Malta.html
+2.	Open DevTools (F12)
+3.	Go to the Network tab and Select Fetch/XHR
+4.	Filter = “graphQL” - URLs containing “graphql.”
+When we filter requests by “graphQL”, we are filtering only API requests with a URL of endpoints “https://www.tripadvisor.com/data/graphql/ids ”, which is a pattern of Tripadvisor’s design
+5.	Click the “Preserve log” check box so reloads don’t clear the list.
+6.	Check the “Disable cache” check box to avoid cached responses.
+7.	Scroll down the page until the reviews section loads.
+8.	See responses with status 200 
+Click the “Size” column header to sort descending (largest first).
+The review response is often one of the largest.
+Insert devtools-tripadvisor-network-requests
+9.	Click the request (the first column, Name). You can see in the Response tab text “Very nice hotel….” that corresponds to the review on the open page
+Insert devtools-tripadvisor-network-response.png
+10.	 Open the Payload, Response, and Preview sub-tab to see the JSON and copy all to text files
+11.	Right‑click the request, choose Copy → Copy as cURL (bash). The cURL command includes URL, Headers, and Payload (JSON body)
+
+
+
+Now we can use the extracted information (text files to build our code)
+1. Payload.txt – Request shape
+- **Query ID:** `ef1a9f94012220d3` (the correct one for reviews; the previous one returned Q&A)
+- **Variables:**
+  - `locationId` (integer)
+  - `filters: [{"axis":"LANGUAGE","selections":["en"]}]`
+  - `limit: 10`, `offset: 10` (numeric pagination)
+  - `sortBy: "SERVER_DETERMINED"`
+  - `language: "en"`, `doMachineTranslation: true`, `photosPerReviewLimit: 3`
+- **Endpoint:** POST to `https://www.tripadvisor.com/data/graphql/ids` with `content-type: application/json`
+Insert payload.json and payload.py
+
+2. Response.txt – Response shape
+- **Response key:** `ReviewsProxy_getReviewListPageForLocation` (not `CommunityUGC__locationTips` or Q&A keys)
+- **Structure:** `data.ReviewsProxy_getReviewListPageForLocation[0]` → `reviews[]`, `totalCount`
+- **Review fields:**
+  - `id`, `title`, `text`, `rating`, `publishedDate`
+  - `userProfile.displayName`
+  - `tripInfo.tripType`
+  - `helpfulVotes`
+  - `mgmtResponse.text` (can be `null`)
+Insert response.json and response.py
+
+3. cURL.txt – Request details
+- Confirmed the GraphQL endpoint and that the payload is sent as JSON
+- Showed the payload is an array of operations (first element is the reviews query)
+Insert cURL.txt  and cURL.py
+
+4. Headers.txt – Request headers
+- `content-type: application/json`
+- `origin` and `referer` for same-origin requests
+- `sec-fetch-*` headers for browser-like requests
+Insert headers.txt  and headers.py
+
+Run code locally
+We should always test our Agent locally, as it takes less time, and we should not pay for the Apify platform. We can change headless to False to see how the browser is launched and all the processes of navigation, etc.
+Temporarily change headless=True to headless=False in make_browser() so we can watch what happens in the browser window.
+With `headless=False`, the browser window will stay visible during runs, which helps with debugging. We can switch it back to `True` when we are done with testing.
+browser = await AsyncNewBrowser(
+                headless=False,
+We need to have the correct INPUT.json (…\storage\key_value_stores\default\INPUT.json) to run it locally:
+Insert input.json
+apify run
+
+When we run our code, we see that the following capture appears 
+Insert “captcha.png” (to check resolution)
+It can be solved manually or with a script automating the slide when run locally,
+insert captcha_auto_slide.py
+but solving it on Apify is not so simple or trivial
+DataDome detects headless Chromium even with Patchright + stealth
+So I decided to switch from Chromium to Camoufox
+https://camoufox.com/
+Camoufox is built for anti-detection
+Camoufox is a fork designed to evade fingerprinting. It changes or spoofs:
+•	WebGL (vendor, renderer)
+•	Canvas rendering
+•	AudioContext
+•	Fonts
+•	Timezone and locale
+•	Other fingerprint vectors that DataDome checks
+•	It aims to pass CreepJS and similar fingerprint tests that Chromium often fails.
+Insert camoufox.py 
+We will see later that it really helped, and the captcha either doesn't appear or is successfully solved with Camoufox
+That is a sample of our output (Places.json in Key-value store and reviews Dataset):
+Insert output_places.json
+Insert output_dataset_reviews.json
+
+
+Performance optimizations – code and explanation
+•	Parallel requests
+I found that PARALLEL REQUESTS - 40 or 50 is the optimal, and further increase doesn’t reduce run time and just increases the probability of blocking 
+
+We run 50 requests in parallel, each request fetches 10 reviews to be in line with the payload. json "limit": 10,
+asyncio.gather(*tasks) schedules them all at once and waits until everyone finishes 
+insert parallel_requests.py
+
+•	Domcontentloaded instead of networkidle
+
+After navigating to the URL, many Playwright setups wait until the page seems “settled”—often using “networkidle”, which means no network activity for about 500 ms. On TripAdvisor, ads and analytics keep opening connections, so reaching that idle state can easily add 10–20 seconds with little benefit for our use case.
+We only need the page shell, cookies/session, and a DOM we can interact with so our in-page GraphQL fetch calls work. So we use domcontentloaded instead: we proceed as soon as the HTML is parsed and the DOM is ready. JavaScript may still be running and resources still loading, but the structure is there, and we can navigate, click the Reviews tab, and run GraphQL—much faster than waiting for the network idle.
+Saves: 5–15 s per place.
+insert domcontentloaded.py
+
+•	Block images, media, fonts (not block JS script)- _block_resources
+We block heavy asset types only; the page, APIs, and captcha iframe still load.
+insert block_resources.py
+
+page.route("**/*", ...) intercepts every outgoing request before it's sent. For image, font, media resource types it calls route.abort() — the request is cancelled immediately. For everything else (HTML, scripts, XHR/fetch for GraphQL, the captcha document iframe) it calls route.continue_().
+DataDome's bot detection is based on browser fingerprint properties (TLS, WebGL, canvas, navigator.*) — all browser-level checks. It doesn't analyse whether images loaded. The captcha iframe is type document, not image, so it still loads normally.
+
+
+Saves: 2–5 s per place.
+
+•	Minimal scroll - scrollBy(0, 400 and Shorter post-click delay - 0.5–1.5s
+insert minimal_scroll.py
+
+Moves the page down by 400 pixels (only vertically; 0 horizontal). 
+As we are using GraphQL with offset, we no longer depend on the DOM loading every review by scrolling. So the long scroll became unnecessary for data; only a small scroll stayed as a light, human-like nudge.
+Otherwise, if we were dependent on DOM, we should have long scrolling (repeat many times (window.scrollBy(0, 500), wait between steps (e.g. ~1.2–2 seconds) so lazy scripts and requests can run)
+
+Saves 15–25 s
+
+•	Captcha self-resolve check
+Camoufox (stealth browser) is meant to look enough like a real user that DataDome clears the check on its own.
+When we see the captcha, we are not trying to rotate to a new proxy or new session immediately, but wait up to ~15 seconds, checking every second whether that iframe is still visible. If it disappears, we treat that as “auto-resolved” (Camoufox passed). It allows us not to waste time and continue immediately after it is solved, and not run too many new cold sessions and retries
+Insert captcha_self_resolve
+Saves: up to 24s per place when captcha self-resolves.
+
+Total savings per place
+Optimization	Saves
+domcontentloaded navigation: 5–12 s
+Block images/fonts/media:	2–5 s
+Captcha self-resolve check: 0–24 s
+Shorter click delay + scroll:	15–25 s
+Total:	~22–66 s per place
+
+Anti-blocking measures
+
+•	Same proxy session for different places  
+First of all, we should use a Residential Proxy
+That is often advised to rotate a proxy and browser session when moving to a new place (hotel, restaurant, etc), but I found that is leading to more blockage and keeps the same proxy/browser and gives better performance. 
+If each new Crawlee browser gets a new proxy URL, which uses a different IP address, it is making the session appear inconsistent to DataDome.
+
+Place 1 — fresh browser, but DataDome runs its JavaScript challenge and decides to let it through. At this point, DataDome writes its own tracking cookie into the browser (something like datadome=xxxxx). That cookie says, "This browser passed our check."
+Place 2 — our code throws away the entire browser and creates a brand new one with zero cookies, zero history, zero state. DataDome sees a completely fresh browser fingerprint with no prior approval and runs the full challenge again on a new proxy IP it has no history with. The combination of "new IP + no cookies" is much more suspicious than "same IP + returning visitor cookie."
+So better to reuse one browser for all places. DataDome's cookie from place 1 carries over to place 2, making it look like the same user browsing multiple places, which is completely natural behavior.
+
+To debug that, I output Proxy and Browser information into logs
+ 
+See as proxy/browser change from IP: 73.244.6.162 to IP: 96.191.113.237 led to blocking:
+2026-03-23T07:33:02.900Z [apify] WARN    Blocked on place 3 (attempt 1/4) — rotating proxy + browser
+Insert proxy-browser-changed.png
+
+The reason IP was changed:
+browser_inactive_threshold = 10s — after 10s with no open pages, browser is "inactive" (default value)
+identify_inactive_browsers_interval = 20s — scans for inactive browsers every 20s
+close_inactive_browsers_interval = 30s — closes inactive browsers every 30s
+
+idle_time in Crawlee is measured from when the page was opened, not closed. A scraping run takes 45+ seconds. After just 10 seconds (browser_inactive_threshold default), the _identify_inactive_browsers task (runs every 20s) moves the browser to the inactive list. _pick_browser_with_free_capacity only looks at _active_browsers — so the next place creates a new browser.
+
+After I updated the code
+Insert browser_inactive_threshold.py
+it worked fine (see the same IP for all places)
+Insert same-proxy-browser-geoip.png
+
+
+•	Browser time zone settings (geoip)
+
+Browser time zone settings should match Proxy parameters (Country, IP address, geolocation, time zone, language, etc.)
+If they don’t, an anti-bot like DataDome can see a mismatch: e.g., Proxy Country is Brazil, but the browser is US, and block the request.
+See the following example when the capture appeared because  
+Proxy: IP = 179.214.41.73, country=BR, time zone=America/Sao Paulo 
+Browser: IP missing, locale=en-US, time zone missing
+Insert captcha-detected-without-geoip.png
+
+
+There's one important architectural constraint: Camoufox has to look up “which country is this IP?” before the browser fully starts. It does that with a quick web request to learn the public IP.
+That request has to go out through your residential proxy. If you only set the proxy on the browser tab/context (how Crawlee often does it), Camoufox’s early lookup does not use that proxy. It uses the server’s normal internet connection instead. Then it thinks the user is wherever that IP is, not where your residential IP is. The clock/timezone and “where am I on the map” style settings get wired to the wrong place.
+So, in plain terms: to make “match me to my residential IP” work, you must give Camoufox the proxy at launch (when you start the browser), not only when you open a new context later.
+
+Insert geoip.py
+
+This code loads the current Apify proxy URL, turns it into Playwright’s proxy dict (server + credentials), and passes it into AsyncNewBrowser together with geoip=True. Camoufox then discovers the residential exit IP through that tunnel and aligns timezone/geolocation / related fingerprint to that IP—something that does not happen if the proxy is only set on new_context. If GeoIP or proxy setup fails (NotInstalledGeoIPExtra, bad IP, proxy error), it drops geoip and browser-level proxy and launches again so the run can continue while Crawlee still applies the proxy on the browser context.
+
+•	Exponential backoff retry — 3 attempts with 3s → 6s → 12s delays
+
+After a failed attempt (e.g. captcha block), wait longer each time before the next try—reduces hammering the same protection.
+
+Insert exponential_backoff.py
+
+•	Random inter-place delay (“between pages” / between place URLs)
+After a place finishes successfully, sleep 2–3 s before the next place so traffic doesn’t look like a tight loop.
+
+Insert random_inter_place_delay.py
+
+•	Random delays inside one place e.g., after load, after tab click, after scroll, between GraphQL rounds:
+•	
+Insert random_delay_inside_one_place.py
+
+•	Humanize=True (don’t use it)
+
+Randomizes cursor movement to look human
+Camoufox injects realistic mouse movement curves
+Humanize is designed for interactive, non-headless use. It injects realistic mouse movement curves, scroll acceleration, and keystroke cadence. On Apify Cloud, headless=True always. No real mouse movements are happening — humanize adds the timing signatures of human interactions, while no actual human-like browser events accompany them. This mismatch is potentially more detectable than consistent headless behavior.
+DataDome uses behavioral signals, not just fingerprints. Unusual action timing patterns from humanize in a headless context could signal "bot imitating human, which DataDome is specifically designed to catch.
+
+Conclusion
+

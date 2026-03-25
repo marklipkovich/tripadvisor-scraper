@@ -1,0 +1,204 @@
+## Writing Style Guidelines 🗞️
+
+### Voice and Tone 🗣️
+
+**Our Voice Is:**
+
+- Developer-to-developer (expert-to-expert)
+- **Personal and experience-based** - "When I built this scraper..." not "One can build a scraper..."
+- Conversational but technical
+- Authentic and genuine, sharing real challenges and solutions
+- Honest about mistakes, failures, and what didn't work
+- Community-focused and collaborative
+
+**Write from YOUR Experience:**
+
+✅ **Good - Personal and Specific:**
+
+"When I built a scraper for monitoring competitor prices, I initially tried using requests but hit a wall with their JavaScript-rendered product pages. After wasting two days debugging, I switched to Crawlee with Playwright and had it working in an afternoon. Here's what I learned..."
+
+"I ran into a frustrating issue where my Apify Actor kept timing out after 100 pages. Turns out I was storing too much in memory. Here's how I fixed it..."
+
+❌ **Avoid - Generic and Impersonal:**
+
+"Web scraping can be challenging when dealing with JavaScript-rendered content. One approach is to use headless browsers. This tutorial will show you how to implement such a solution."
+
+"There are several ways to handle pagination in web scraping. Let's explore the most common methods..."
+**Share Your Journey:**
+
+- What problem were you actually trying to solve?
+- What did you try first that didn't work?
+- What was the "aha!" moment?
+- What would you do differently next time?
+- What surprised you during implementation?
+
+### Grammar and Style Rules 🖊️
+
+**Sentence Structure:**
+
+- Prefer active voice: "Playwright launches a browser" not "A browser is launched by Playwright"
+- Keep sentences under 20 words when possible
+- Vary sentence length for rhythm
+- Front-load important information
+
+**Technical Terminology:**
+
+- Define acronyms on first use: "Document Object Model (DOM)"
+- Use industry-standard terms consistently
+- Explain complex concepts briefly
+- Don't over-explain basic programming concepts
+
+**Product Names:**
+
+- Apify (always capitalized)
+- Crawlee (always capitalized)
+- Actors (capitalized when referring to Apify Actors)
+- Playwright, Puppeteer, Selenium (standard capitalizations)
+### Formatting Conventions ℹ️
+
+**Text Formatting:**
+
+- **Bold** for emphasis on key terms, important concepts (use sparingly)
+- Code font for inline code, commands, filenames, package names
+- *Italics* rarely used (only for emphasis when bold is too strong)
+
+**Headers:**
+
+- H1: Article title only (handled by CMS)
+- H2: Major sections (sentence case)
+- H3: Subsections (sentence case)
+- Never use title case: "Setting up your environment" not "Setting Up Your Environment"
+
+**Lists:**
+
+- Bullet points for unordered items, features, options
+- Numbered lists for sequential steps, procedures
+- Keep list items parallel in structure
+- Each item should be substantial (avoid 1-2 word items)
+## Do's and Don'ts ✌️
+
+### Content Do's ✅
+
+- **Do** write about YOUR actual experience with Apify/Crawlee
+- **Do** share YOUR specific project, challenges, and solutions
+- **Do** include concrete details from YOUR implementation (timelines, costs, data volumes)
+- **Do** describe what YOU tried that didn't work first
+- **Do** use first-person voice ("I built", "I learned", "I discovered")
+- **Do** provide complete, working code from YOUR actual implementation
+- **Do** include a GitHub repository with your full project code if applicable
+- **Do** show real debugging processes and errors YOU encountered
+- **Do** write developer-to-developer in YOUR authentic voice
+- **Do** use multiple screenshots from YOUR actual implementation
+- **Do** test all code before submitting
+- **Do** share what YOU would do differently next time
+- **Do** link to relevant Apify/Crawlee resources naturally
+- **Do** explain YOUR decision-making process
+- **Do** be honest about YOUR mistakes and learnings
+- **Do** include specific Apify Actors or Crawlee features YOU used
+### Content Don'ts ❌
+
+- **Don't** write generic tutorials without personal experience
+- **Don't** use AI to generate content you haven't personally validated
+- **Don't** include AI writing clichés ("let's dive in", "in today's landscape")
+- **Don't** write about tools you haven't actually used
+- **Don't** submit articles without clear Apify/Crawlee connection
+- **Don't** write in third-person or passive voice ("one can build")
+- **Don't** submit previously published content
+- **Don't** use copyrighted images without permission
+- **Don't** write for complete beginners with no coding experience
+- **Don't** submit generic code snippets without YOUR implementation context
+- **Don't** use generic anchor text like "click here"
+- **Don't** keyword stuff for SEO
+- **Don't** make claims without backing them up with YOUR experience
+- **Don't** ignore accessibility (alt text, clear language)
+- **Don't** use overly salesy or promotional language
+- **Don't** submit incomplete or untested code
+- **Don't** skip error handling in YOUR examples
+- **Don't** rehash official documentation without adding YOUR insights
+- **Don't** write about "best practices" without showing YOUR implementation
+Submission Checklist 🏁
+Before submitting your article, verify each item:
+Authenticity and Personal Experience (CRITICAL):
+•	This describes something I ACTUALLY built with Apify/Crawlee
+•	I've included specific details from MY real implementation
+•	This couldn't be written by someone who hasn't used these tools
+•	My authentic voice is present (not AI-generated patterns)
+•	I've shared MY genuine challenges, mistakes, and learnings
+•	The code is from MY actual project, not theoretical examples
+•	I've described MY specific use case and why I chose this approach
+Content Completeness:
+•	Article is 1,000-5,000 words (appropriate for topic depth)
+•	Introduction hooks reader and states value proposition
+•	Prerequisites section included (for tutorials)
+•	Body has clear H2 and H3 headers (sentence case)
+•	Conclusion summarizes and provides next steps
+•	FAQ section included (if applicable)
+Code Quality:
+•	All code is complete and runnable
+•	Code includes proper imports and setup
+•	Error handling is included
+•	Comments explain complex logic
+•	Code is properly formatted and indented
+•	GitHub repository link provided with full code
+•	All code has been tested and verified working
+Visual Elements:
+•	3-8 relevant screenshots included
+•	All images compressed for web
+•	Image filenames are descriptive and keyword-rich
+•	Alt text provided for every image
+•	No copyrighted images used without permission
+•	Images placed immediately after relevant text
+Technical Accuracy:
+•	All technical information verified and accurate
+•	Package versions specified where relevant
+•	Commands and syntax tested
+•	Links to documentation are current and working
+•	Code works in specified environment
+Writing Quality:
+•	Personal, conversational tone throughout (first-person)
+•	No AI writing patterns ("let's dive in", "in today's landscape")
+•	Active voice used predominantly
+•	Sentences under 20 words (mostly)
+•	No spelling or grammar errors
+•	Technical terms used correctly and consistently
+•	Authentic voice that sounds like ME
+•	Share MY thought process and decision-making
+SEO Optimization:
+•	Primary keyword identified and used naturally
+•	Keywords in title, introduction, and 2+ headers
+•	Meta description written (140-160 characters)
+•	3-5 internal links to Apify/Crawlee resources
+•	2-4 external links to relevant sources
+•	Descriptive anchor text for all links
+•	Image alt text includes keywords naturally
+Originality and Attribution:
+•	Content is original and unpublished elsewhere
+•	All sources cited with links
+•	Code from others properly attributed
+•	No plagiarism or copyright violations
+Community Guidelines:
+•	Content follows ethical scraping practices
+•	Respects robots.txt and terms of service discussions
+•	No promotion of harmful or illegal scraping
+•	Includes appropriate legal disclaimers where relevant
+Submission Format
+Required Files:
+•	Article in Markdown format (.md file)
+•	All images in a separate folder (JPG/PNG/WebP)
+•	GitHub repository link for complete code
+•	Author bio (50-100 words)
+•	Author headshot (300x300px minimum)
+•	Suggested meta description
+•	Social media handles for author credit
+File Naming:
+•	Article: article-title-slug.md
+•	Images: descriptive-name-with-keywords.png
+•	Image folder: article-title-images/
+
+
+
+
+
+
+
+
