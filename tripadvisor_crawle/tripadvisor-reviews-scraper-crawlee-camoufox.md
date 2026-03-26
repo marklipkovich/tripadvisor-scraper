@@ -12,18 +12,36 @@ tags: [community]
 One of our community members wrote this guide as a contribution to the Crawlee Blog. If you'd like to contribute articles like these, please reach out to us on [Apify's Discord channel](https://discord.com/invite/jyEM2PRvMU).
 :::
 
-I built this Actor for the [Apify Store](https://apify.com/store) to give developers reliable, structured access to TripAdvisor review data at scale. TripAdvisor is protected by [DataDome](https://datadome.co/), one of the more aggressive bot protection systems, and scraping it consistently required some non-obvious solutions — a GraphQL API discovered through DevTools, a stealth Firefox fork instead of Chromium, and a few counterintuitive proxy decisions.
+This article is a **hands-on walkthrough** of how to scrape [TripAdvisor](https://www.tripadvisor.com/) reviews with **Python**, **[Crawlee](https://crawlee.dev/python)**, and **[Camoufox](https://camoufox.com/)** — the same stack I used in an [Apify Actor](https://apify.com/store) you can deploy later, but the focus here is **how to discover the API, wire the crawler, and get past blocking**, not product marketing. TripAdvisor sits behind [DataDome](https://datadome.co/); getting reliable data meant finding TripAdvisor’s **GraphQL** surface in DevTools, swapping Chromium for a stealth **Firefox** build, and making **proxy and browser session** choices that feel wrong until you’ve seen them fail the other way.
 
-TripAdvisor review data is useful for a wide range of real-world applications:
+### Prerequisites
 
-- **Reputation management** — monitor ratings and review volume over time for your own properties
-- **Competitor monitoring and intelligence** — track competitors' review trends, response rates, and sentiment shifts
-- **Sentiment analysis and insights** — process structured review text for NLP pipelines
-- **Trend spotting** — detect emerging topics (service issues, location problems, staff mentions) before they affect ratings
-- **AI/LLM training data** — large-scale authentic review text in multiple languages
-- **Market research** — aggregate data across property categories, cities, or price tiers
+Before you follow along, you should have:
 
-After hitting walls with standard headless Chromium approaches, I ended up with a solution built around Crawlee, a custom [Camoufox](https://camoufox.com/) browser plugin, and TripAdvisor's internal [GraphQL](https://graphql.org) API. This article walks through exactly what I built, what broke, and the specific lessons I wouldn't have learned without going through the whole process.
+- **Python** — 3.10+ recommended (the reference Actor uses **3.12** in its Docker image). Comfortable with **`async`/`await`** helps.
+- **Python packages** — [Crawlee for Python](https://crawlee.dev/python) with **Playwright**, the **[Apify SDK for Python](https://docs.apify.com/sdk/python)**, **Camoufox** (with the **`geoip`** extra for proxy-aligned fingerprinting), plus **httpx** and **typing-extensions**. Pin roughly like this:
+
+```text
+apify ~= 3.3.0
+camoufox[geoip] ~= 0.4.11
+crawlee[playwright] ~= 1.5.0
+httpx ~= 0.28.1
+typing-extensions ~= 4.15.0
+```
+
+Install in a virtual environment:
+
+```bash
+pip install "apify~=3.3.0" "camoufox[geoip]~=0.4.11" "crawlee[playwright]~=1.5.0" "httpx~=0.28.1" "typing-extensions~=4.15.0"
+python -m camoufox fetch
+```
+
+- **Browser DevTools** — **Chrome** or **Edge** (F12 → **Network**). You will inspect **Fetch/XHR** and copy requests as **cURL** before writing scraping code.
+- **TripAdvisor in the browser** — a normal place URL on `tripadvisor.com` to reproduce the network calls (hotel, restaurant, or attraction).
+- **Apify Cloud runs** — an [Apify account](https://apify.com/) and **[Apify Proxy](https://docs.apify.com/platform/proxy)** with a **residential** group for anything beyond quick local experiments; DataDome typically blocks **datacenter** IPs.
+- **Optional** — [Apify CLI](https://docs.apify.com/cli) (`apify run`, `apify push`) if you mirror the Actor layout.
+
+After hitting walls with standard headless Chromium approaches, I ended up with a solution built around Crawlee, a custom Camoufox **browser plugin**, and TripAdvisor's internal [GraphQL](https://graphql.org) API. The rest of the article walks through what I built, what broke, and what I’d do differently next time.
 
 ## What the Actor does
 
@@ -38,13 +56,13 @@ The Actor uses Crawlee's [`PlaywrightCrawler`](https://crawlee.dev/python/docs/g
 If you find this article useful, consider starring [Crawlee for Python on GitHub](https://github.com/apify/crawlee-python). It helps spread the word to other scraper developers.
 :::
 
-## Step 1: Inspect TripAdvisor with DevTools before writing any code
+## 1. DOM inspection with DevTools
 
-Before touching a keyboard, I spent 20 minutes in DevTools on a TripAdvisor hotel page. This was the most valuable 20 minutes of the whole project.
+Before touching a keyboard, I spent 20 minutes in DevTools on a TripAdvisor hotel page.
 
 Here's exactly what to do:
 
-1. Open a TripAdvisor place page — for example: `https://www.tripadvisor.com/Hotel_Review-g190327-d264939-Reviews-The_Waterfront_Hotel-Sliema_Island_of_Malta.html`
+1. Open a TripAdvisor place page — for example: [The Waterfront Hotel, Sliema](https://www.tripadvisor.com/Hotel_Review-g190327-d264939-Reviews-The_Waterfront_Hotel-Sliema_Island_of_Malta.html)
 2. Open DevTools (F12) → **Network** tab → select **Fetch/XHR**
 3. Type `graphql` in the filter box — this shows only calls to `https://www.tripadvisor.com/data/graphql/ids`
 4. Check **Preserve log** and **Disable cache**
@@ -53,13 +71,46 @@ Here's exactly what to do:
 
 ![DevTools Network tab showing TripAdvisor GraphQL requests filtered by "graphql"](./tripadvisor-reviews-scraper-python-crawlee-camoufox-images/devtools-tripadvisor-network-requests.png)
 
-Click any large request. In the **Response** tab you'll see review text matching what's on screen — "Very nice hotel…" — confirming this is the right endpoint.
+7. Click any large GraphQL request in the list. In the **Response** tab you'll see review text matching what's on screen — "Very nice hotel…" — confirming this is the right endpoint.
 
 ![DevTools Response tab showing TripAdvisor GraphQL review JSON data](./tripadvisor-reviews-scraper-python-crawlee-camoufox-images/devtools-tripadvisor-network-response.png)
 
-Right-click the request → **Copy → Copy as cURL**. This gives you the full URL, all headers, and the exact JSON payload in one shot.
+8. Open the **Payload**, **Response**, and **Preview** sub-tabs to see the JSON and copy the contents into text files for your notes
+9. Right-click the request → **Copy → Copy as cURL (bash)**. The cURL command includes the URL, headers, and **Payload** (JSON body).
 
-## Step 2: Understand the GraphQL payload, response, and headers
+## 2. Run code locally
+
+### Local testing
+
+For local runs, temporarily set `headless=False` to watch the browser:
+
+```python
+browser = await AsyncNewBrowser(
+    headless=False,
+    ...
+)
+```
+
+Your `INPUT.json` goes at `storage/key_value_stores/default/INPUT.json`:
+
+```json
+{
+  "startUrls": [
+    { "url": "https://www.tripadvisor.com/Hotel_Review-g190327-d264936-Reviews-1926_Le_Soleil_Hotel_Spa-Sliema_Island_of_Malta.html" },
+    { "url": "https://www.tripadvisor.com/Hotel_Review-g190327-d264939-Reviews-The_Waterfront_Hotel-Sliema_Island_of_Malta.html" }
+  ],
+  "maxReviewsPerPlace": 300,
+  "proxyConfiguration": { "useApifyProxy": false }
+}
+```
+
+Run with:
+
+```bash
+apify run
+```
+
+## 3. Discover capture
 
 ### Payload
 
@@ -68,7 +119,7 @@ TripAdvisor uses a `preRegisteredQueryId` pattern — one endpoint that handles 
 **Query ID:** `ef1a9f94012220d3`
 
 :::note
-There are several query IDs on this endpoint. `ef1a9f94012220d3` is the reviews query. `3f2df7139a71a643` returns page routing data. Others return Q&A, photos, etc. Using the wrong ID is a common mistake that wastes a lot of debugging time.
+There are several query IDs on this endpoint. `ef1a9f94012220d3` is the reviews query we need.
 :::
 
 The payload captured from DevTools:
@@ -107,11 +158,10 @@ The Python function that builds this payload:
 ```python
 async def fetch_reviews_via_graphql(
     page: Page, location_id: str, offset: int = 0, limit: int = 10
-) -> Optional[list]:
-    """
-    Fetch full hotel reviews via ReviewsProxy_getReviewListPageForLocation.
-    Query ef1a9f94012220d3 (from devtools/cURL.txt).
-    """
+) -> list[dict]:
+    
+    """Fetch one page of reviews via TripAdvisor GraphQL API from within the browser page."""
+    
     variables = {
         "locationId": int(location_id),
         "filters": [{"axis": "LANGUAGE", "selections": ["en"]}],
@@ -166,11 +216,7 @@ A truncated sample of the raw GraphQL response (from `response.json`):
                 "connectionToSubject": "Owner"
               }
             }
-          ]
-        }
-      ]
-    }
-  }
+...      
 ]
 ```
 
@@ -256,6 +302,7 @@ referer: https://www.tripadvisor.com/Hotel_Review-g190327-d264936-Reviews-1926_L
 
 In the `page.evaluate()` call, `credentials: 'include'` ensures the browser's session cookies are sent automatically, and `Referer: window.location.href` mirrors the current page URL — matching what the DevTools headers show:
 
+
 ```python
 result = await page.evaluate(
     """
@@ -278,37 +325,11 @@ result = await page.evaluate(
     {"url": url, "payload": payload},
 )
 ```
-
-## Step 3: Fetch reviews from within the browser using `page.evaluate()`
-
 This is the core technique. TripAdvisor's GraphQL API validates session cookies and CSRF state, so calling it directly from Python with `httpx` or `requests` doesn't work reliably. Instead, I run a `fetch()` call from inside the Playwright page using `page.evaluate()`. This inherits all the browser's cookies — including any DataDome approval cookies — with no manual authentication needed.
-
-```python
-result = await page.evaluate(
-    """
-    async (args) => {
-        const resp = await fetch(args.url, {
-            method: 'POST',
-            credentials: 'include',
-            headers: {
-                'Content-Type': 'application/json',
-                'Accept': '*/*',
-                'Origin': 'https://www.tripadvisor.com',
-                'Referer': window.location.href,
-            },
-            body: JSON.stringify(args.payload),
-        });
-        if (!resp.ok) return null;
-        return await resp.json();
-    }
-    """,
-    {"url": url, "payload": payload},
-)
-```
 
 The request runs in JavaScript inside the browser context. Clean, structured JSON comes back directly. This pattern works for any site where the API relies on session cookies that are difficult to replicate externally.
 
-## Step 4: Parallel GraphQL pagination
+### Parallel GraphQL pagination
 
 Each request returns exactly 10 reviews. To scrape 500 reviews efficiently, I run batches of 50 concurrent requests using `asyncio.gather()`:
 
@@ -355,56 +376,9 @@ The advantages of this approach over HTML parsing:
 - **Stability** — TripAdvisor can rearrange HTML without affecting the API contract
 - **Scale** — no hard cap from HTML pagination; can reach thousands of reviews per place
 
-## Output
+## 4. Move to Camoufox
 
-After a successful run, the Actor produces two datasets.
-
-**Places** (Key-Value Store, `places.json`):
-
-```json
-[
-  {
-    "id": "264939",
-    "url": "https://www.tripadvisor.com/Hotel_Review-g190327-d264939-Reviews-The_Waterfront_Hotel-Sliema_Island_of_Malta.html",
-    "name": "The Waterfront Hotel",
-    "place_type": "LodgingBusiness",
-    "rating": "4.4",
-    "totalReviews": 3876,
-    "scrapedReviews": 600,
-    "address": "Triq Ix - Xatt",
-    "city": "Sliema",
-    "region": "",
-    "country": "MT",
-    "price_range": "$ (Based on Average Nightly Rates for a Standard Room from our Partners)",
-    "image": "https://dynamic-media-cdn.tripadvisor.com/media/photo-o/2a/52/68/5d/the-waterfront-hotel.jpg?w=500&h=-1&s=1",
-    "ratingDistribution": null,
-    "oldestDate": "2025-08-17",
-    "error": null
-  }
-]
-```
-
-**Reviews** (Dataset):
-
-```json
-[
-  {
-    "placeName": "The Waterfront Hotel",
-    "rating": 5,
-    "title": "Enjoyable 4 night stay at the Waterfront hotel Sliema, Malta",
-    "text": "The hotel was fairly modern and our room was very clean and the king size bed was comfortable. The staff were very helpful and friendly, the breakfasts were very good with lots of options from yogurts to omelettes.",
-    "publishedDate": "2026-03-24",
-    "travelDate": "2026-03",
-    "tripType": "NONE",
-    "lang": "en",
-    "reviewerName": "Stephen O",
-    "helpfulVotes": 0,
-    "placeUrl": "https://www.tripadvisor.com/Hotel_Review-g190327-d264939-Reviews-The_Waterfront_Hotel-Sliema_Island_of_Malta.html"
-  }
-]
-```
-
-## Step 5: Hitting DataDome — and switching to Camoufox
+### Hitting DataDome and switching from Chromium
 
 My first implementation used standard Playwright with Chromium and Patchright (a stealth-patched Chromium fork). On the first local run, I got this:
 
@@ -458,7 +432,8 @@ async def run():
 
 After switching to Camoufox with a residential proxy, the captcha stopped appearing on most requests. When it did appear, Camoufox's fingerprint was convincing enough that DataDome cleared it automatically within a few seconds.
 
-## Step 6: Integrating Camoufox into Crawlee
+
+### Integrating Camoufox into Crawlee
 
 Crawlee's `PlaywrightCrawler` uses a `BrowserPool` to manage browser lifecycle. Crawlee has a guide on [avoiding getting blocked](https://crawlee.dev/python/docs/guides/avoid-blocking) that covers fingerprinting, headers, and proxy use — but for DataDome specifically, I needed to go further and replace the browser entirely. To use Camoufox instead of standard Playwright browsers, I subclassed `PlaywrightBrowserPlugin` and overrode `new_browser()`:
 
@@ -539,7 +514,80 @@ Key settings:
 - `retry_on_blocked=False` — we handle DataDome blocks ourselves via `CaptchaBlockedError`
 - `ignore_http_error_status_codes=[403, 429, 503]` — let Camoufox handle these instead of Crawlee aborting immediately
 
-## Performance optimizations
+## 5. Move to Apify Cloud
+
+### Deploy to Apify
+
+```bash
+apify push
+```
+
+The Actor accepts these input fields:
+
+| Field | Type | Description |
+|---|---|---|
+| `startUrls` | array | TripAdvisor place URLs (hotels, restaurants, attractions) |
+| `maxReviewsPerPlace` | integer | Maximum reviews per place (omit for unlimited) |
+| `startDate` | string | Filter: only reviews on or after this date (YYYY-MM-DD) |
+| `endDate` | string | Filter: only reviews on or before this date (YYYY-MM-DD) |
+| `reviewRatings` | array | Filter by star rating: [1], [5], [3,4,5], etc. |
+| `language` | string | Filter by review language code (e.g. `en`, `de`, `fr`) |
+| `proxyConfiguration` | object | [Apify Proxy](https://docs.apify.com/platform/proxy) settings — use Residential Proxy for reliable bypassing |
+
+:::note
+Without residential proxy, DataDome blocks datacenter IPs regardless of browser fingerprint. Camoufox handles fingerprint detection, but [residential proxy](https://docs.apify.com/platform/proxy/residential-proxy) is required on Apify Cloud for consistent results.
+:::
+
+## 6. Output samples
+
+After a successful run, the Actor produces two datasets.
+
+**Places** (Key-Value Store, `places.json`):
+
+```json
+[
+  {
+    "id": "264939",
+    "url": "https://www.tripadvisor.com/Hotel_Review-g190327-d264939-Reviews-The_Waterfront_Hotel-Sliema_Island_of_Malta.html",
+    "name": "The Waterfront Hotel",
+    "place_type": "LodgingBusiness",
+    "rating": "4.4",
+    "totalReviews": 3876,
+    "scrapedReviews": 600,
+    "address": "Triq Ix - Xatt",
+    "city": "Sliema",
+    "region": "",
+    "country": "MT",
+    "price_range": "$ (Based on Average Nightly Rates for a Standard Room from our Partners)",
+    "image": "https://dynamic-media-cdn.tripadvisor.com/media/photo-o/2a/52/68/5d/the-waterfront-hotel.jpg?w=500&h=-1&s=1",
+    "ratingDistribution": null,
+    "oldestDate": "2025-08-17",
+    "error": null
+  }
+]
+```
+
+**Reviews** (Dataset):
+
+```json
+[
+  {
+    "placeName": "The Waterfront Hotel",
+    "rating": 5,
+    "title": "Enjoyable 4 night stay at the Waterfront hotel Sliema, Malta",
+    "text": "The hotel was fairly modern and our room was very clean and the king size bed was comfortable. The staff were very helpful and friendly, the breakfasts were very good with lots of options from yogurts to omelettes.",
+    "publishedDate": "2026-03-24",
+    "travelDate": "2026-03",
+    "tripType": "NONE",
+    "lang": "en",
+    "reviewerName": "Stephen O",
+    "helpfulVotes": 0,
+    "placeUrl": "https://www.tripadvisor.com/Hotel_Review-g190327-d264939-Reviews-The_Waterfront_Hotel-Sliema_Island_of_Malta.html"
+  }
+]
+```
+
+## 7. Performance optimisation
 
 After I had the basic version working, I profiled it and found 22–66 seconds of unnecessary waiting per place. Here's what I changed and why.
 
@@ -632,7 +680,7 @@ if captcha_seen:
 | Captcha self-resolve | 0–24s |
 | **Total** | **~22–66s per place** |
 
-## Anti-blocking measures
+## 8. Anti-blocking measures
 
 ### Keep the same browser and proxy for all places
 
@@ -760,60 +808,6 @@ await asyncio.sleep(delay)
 Camoufox has a `humanize=True` parameter that injects realistic mouse movement curves and keystroke timing. I tried it, expecting it to help — it made things worse.
 
 On Apify Cloud, `headless=True` always. No actual browser events are happening. The `humanize` timing signatures appear without the corresponding real interactions, creating a pattern that DataDome is specifically designed to detect: a bot imitating human behavior without the underlying human input. `humanize=False` gave measurably better results on headless Cloud runs.
-
-## Running locally and deploying
-
-### Local testing
-
-For local runs, temporarily set `headless=False` to watch the browser:
-
-```python
-browser = await AsyncNewBrowser(
-    headless=False,
-    ...
-)
-```
-
-Your `INPUT.json` goes at `storage/key_value_stores/default/INPUT.json`:
-
-```json
-{
-  "startUrls": [
-    { "url": "https://www.tripadvisor.com/Hotel_Review-g190327-d264936-Reviews-1926_Le_Soleil_Hotel_Spa-Sliema_Island_of_Malta.html" },
-    { "url": "https://www.tripadvisor.com/Hotel_Review-g190327-d264939-Reviews-The_Waterfront_Hotel-Sliema_Island_of_Malta.html" }
-  ],
-  "maxReviewsPerPlace": 300,
-  "proxyConfiguration": { "useApifyProxy": false }
-}
-```
-
-Run with:
-
-```bash
-apify run
-```
-
-### Deploy to Apify
-
-```bash
-apify push
-```
-
-The Actor accepts these input fields:
-
-| Field | Type | Description |
-|---|---|---|
-| `startUrls` | array | TripAdvisor place URLs (hotels, restaurants, attractions) |
-| `maxReviewsPerPlace` | integer | Maximum reviews per place (omit for unlimited) |
-| `startDate` | string | Filter: only reviews on or after this date (YYYY-MM-DD) |
-| `endDate` | string | Filter: only reviews on or before this date (YYYY-MM-DD) |
-| `reviewRatings` | array | Filter by star rating: [1], [5], [3,4,5], etc. |
-| `language` | string | Filter by review language code (e.g. `en`, `de`, `fr`) |
-| `proxyConfiguration` | object | [Apify Proxy](https://docs.apify.com/platform/proxy) settings — use Residential Proxy for reliable bypassing |
-
-:::note
-Without residential proxy, DataDome blocks datacenter IPs regardless of browser fingerprint. Camoufox handles fingerprint detection, but [residential proxy](https://docs.apify.com/platform/proxy/residential-proxy) is required on Apify Cloud for consistent results.
-:::
 
 ## Conclusion
 
