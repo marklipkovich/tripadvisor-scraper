@@ -32,11 +32,10 @@ This article walks through how I built an [Apify Actor](https://apify.com/store)
 Before you follow along, you should have:
 
 - **Python** — 3.10+ recommended (the reference Actor uses **3.12** in its Docker image). Comfortable with **`async`/`await`** helps.
-- **Python packages** — [Crawlee for Python](https://crawlee.dev/python) with **Playwright**, the [Apify SDK for Python](https://docs.apify.com/sdk/python), **Camoufox** (with the **`geoip`** extra for proxy-aligned fingerprinting), plus **httpx** and **typing-extensions**. Pin roughly like this:
+- **Python packages** — [Crawlee for Python](https://crawlee.dev/python) with **Playwright**, the [Apify SDK for Python](https://docs.apify.com/sdk/python), **httpx**, and **typing-extensions** (Camoufox is installed in [§3 Move to Camoufox](#3-move-to-camoufox)). Pin roughly like this:
 
 ```text
 apify ~= 3.3.0
-camoufox[geoip] ~= 0.4.11
 crawlee[playwright] ~= 1.5.0
 httpx ~= 0.28.1
 typing-extensions ~= 4.15.0
@@ -45,8 +44,7 @@ typing-extensions ~= 4.15.0
 Install in a virtual environment:
 
 ```bash
-pip install "apify~=3.3.0" "camoufox[geoip]~=0.4.11" "crawlee[playwright]~=1.5.0" "httpx~=0.28.1" "typing-extensions~=4.15.0"
-python -m camoufox fetch
+pip install "apify~=3.3.0" "crawlee[playwright]~=1.5.0" "httpx~=0.28.1" "typing-extensions~=4.15.0"
 ```
 
 - **Browser DevTools** — **Chrome** or **Edge** (F12 → **Network**). You will inspect **Fetch/XHR** and copy requests as **cURL** before writing scraping code.
@@ -474,6 +472,13 @@ But that doesn't scale to Apify Cloud. Even with every stealth patch applied, he
 - Fonts
 - Timezone and locale
 - Navigator properties (platform, plugins, hardware concurrency)
+
+Install it with the `geoip` extra, then download the browser binary:
+
+```bash
+pip install "camoufox[geoip]~=0.4.11"
+python -m camoufox fetch  # downloads the browser binary (~200 MB)
+```
 
 The basic Camoufox setup:
 

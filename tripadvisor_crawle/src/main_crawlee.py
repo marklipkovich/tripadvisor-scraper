@@ -252,7 +252,7 @@ def _normalize_place(raw: dict, url: str = "", loc_id: str = "") -> dict:
         "id":                raw.get("id") or loc_id or "",
         "url":               raw.get("url") or url or "",
         "name":              raw.get("name") or "",
-        "place_type":        raw.get("place_type") or "",
+        "placeType":         raw.get("placeType") or "",
         "rating":            raw.get("rating") or None,
         "totalReviews":      raw.get("review_count") or raw.get("totalReviews") or 0,
         "scrapedReviews":    raw.get("scrapedReviews") or raw.get("reviewCount") or 0,
@@ -260,7 +260,7 @@ def _normalize_place(raw: dict, url: str = "", loc_id: str = "") -> dict:
         "city":              raw.get("city") or "",
         "region":            raw.get("region") or "",
         "country":           raw.get("country") or "",
-        "price_range":       raw.get("price_range") or "",
+        "priceRange":        raw.get("priceRange") or "",
         "image":             raw.get("image") or "",
         "ratingDistribution": raw.get("ratingDistribution") or None,
         "oldestDate":        raw.get("oldestDate") or "",
@@ -275,7 +275,7 @@ def _build_places_md(places: list[dict]) -> str:
         name       = p.get("name") or "Unknown"
         pid        = p.get("id") or ""
         url        = p.get("url") or ""
-        place_type = p.get("place_type") or ""
+        place_type = p.get("placeType") or ""
         rating     = p.get("rating") or ""
         total      = p.get("totalReviews") or 0
         scraped    = p.get("scrapedReviews") or 0
@@ -283,7 +283,7 @@ def _build_places_md(places: list[dict]) -> str:
         city       = p.get("city") or ""
         region     = p.get("region") or ""
         country    = p.get("country") or ""
-        price      = p.get("price_range") or ""
+        price      = p.get("priceRange") or ""
         image      = p.get("image") or ""
         oldest     = p.get("oldestDate") or ""
         dist       = p.get("ratingDistribution") or {}
@@ -419,14 +419,14 @@ def parse_place_from_jsonld(ld: dict, url: str) -> dict:
     return {
         "url": url,
         "name": ld.get("name") or "",
-        "place_type": ld.get("@type") or "LodgingBusiness",
+        "placeType": ld.get("@type") or "LodgingBusiness",
         "rating": rating_value,
         "review_count": review_count,
         "address": street,
         "city": locality,
         "region": region,
         "country": country,
-        "price_range": ld.get("priceRange") or "",
+        "priceRange": ld.get("priceRange") or "",
         "image": ld.get("image") or "",
     }
 
