@@ -3,7 +3,7 @@ slug: tripadvisor-reviews-scraper-python-crawlee-camoufox
 title: How to scrape TripAdvisor reviews with Python, Crawlee, and Camoufox
 description: Scrape TripAdvisor reviews with Python, Crawlee, and Camoufox. Bypass DataDome using stealth Firefox, GeoIP matching, and parallel GraphQL fetching.
 authors:
-  - name: Mark
+  - name: Mark Lipkovich
     title: Apify community developer specializing in high-fidelity data extraction for ML/AI training, automation, and data analysis. Published scrapers on the Apify Store include this Actor and a YouTube Transcript Scraper, with more extraction tools in development.
 tags: [community]
 ---

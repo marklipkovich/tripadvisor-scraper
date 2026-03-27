@@ -1,12 +1,10 @@
 # Feel free to add your Python dependencies below. For formatting guidelines, see:
 # https://pip.pypa.io/en/latest/reference/requirements-file-format/
 
+
 apify ~= 3.3.0
-# camoufox is pre-installed in the base image (apify/actor-python-playwright-camoufox).
-# Do NOT add it here — pip reinstalling a different version triggers a binary re-download.
+camoufox[geoip] ~= 0.4.11
+geoip2 >= 4.8.0
 crawlee[playwright] ~= 1.5.0
-# httpx is a crawlee transitive dependency; listed explicitly for the proxy timezone probe.
-httpx >= 0.24.0
-#typing-extensions >= 4.0.0
+httpx ~= 0.28.1
 typing-extensions ~= 4.15.0
-camoufox == 0.4.11
