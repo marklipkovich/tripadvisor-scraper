@@ -1,9 +1,11 @@
 """
-Browser infrastructure: Camoufox plugin, proxy utilities, and viewport constants.
+Browser infrastructure: Camoufox plugin, proxy timezone probe, and viewport constants.
 
 CamoufoxPlugin wraps Crawlee's PlaywrightBrowserPlugin to launch stealth Firefox
-(Camoufox) instead of standard Playwright Firefox. Proxy exit identity is fetched
-once per browser session via Playwright's APIRequestContext.
+(Camoufox) instead of standard Playwright Firefox.  The proxy exit IP is probed
+via httpx before launching so Camoufox's geoip= parameter receives the actual
+IP string, which it looks up in the local MaxMind database to auto-configure
+timezone, geolocation, and related fingerprint fields.
 """
 
 from __future__ import annotations
@@ -11,11 +13,11 @@ from __future__ import annotations
 import os as _os
 import random
 from typing import Any
-from urllib.parse import unquote, urlparse
+
+import httpx  # type: ignore[import-untyped]
 
 from apify import Actor
 from camoufox import AsyncNewBrowser
-from camoufox.exceptions import InvalidIP, InvalidProxy, NotInstalledGeoIPExtra
 from crawlee.browsers import BrowserPool, PlaywrightBrowserController, PlaywrightBrowserPlugin
 from playwright.async_api import Page
 from typing_extensions import override
@@ -35,72 +37,73 @@ VIEWPORTS = [
     {"width": 1920, "height": 1080},
 ]
 
+# Maps Apify proxy country codes to plausible IANA timezones (for log display).
+COUNTRY_TIMEZONES: dict[str, list[str]] = {
+    "US": ["America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles"],
+    "GB": ["Europe/London"],
+    "CA": ["America/Toronto", "America/Vancouver", "America/Edmonton"],
+    "AU": ["Australia/Sydney", "Australia/Melbourne", "Australia/Brisbane"],
+    "DE": ["Europe/Berlin"],
+    "FR": ["Europe/Paris"],
+    "NL": ["Europe/Amsterdam"],
+    "IE": ["Europe/Dublin"],
+    "IT": ["Europe/Rome"],
+    "ES": ["Europe/Madrid"],
+    "PL": ["Europe/Warsaw"],
+    "SE": ["Europe/Stockholm"],
+    "IN": ["Asia/Kolkata"],
+    "JP": ["Asia/Tokyo"],
+    "SG": ["Asia/Singapore"],
+    "BR": ["America/Sao_Paulo", "America/Manaus"],
+}
+
 _DEFAULT_TIMEZONE = "Europe/London"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  PROXY UTILITIES
+#  PROXY TIMEZONE PROBE
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _apify_proxy_url_to_playwright_proxy(proxy_url: str) -> dict[str, str]:
-    """Parse Apify/Crawlee proxy URL into Playwright/Camoufox `proxy` dict."""
-    p = urlparse(proxy_url)
-    if not p.scheme or not p.hostname:
-        raise ValueError(f"Invalid proxy URL: {proxy_url!r}")
-    port = p.port or (443 if p.scheme == "https" else 80)
-    server = f"{p.scheme}://{p.hostname}:{port}"
-    out: dict[str, str] = {"server": server}
-    if p.username is not None:
-        out["username"] = unquote(p.username)
-    if p.password is not None:
-        out["password"] = unquote(p.password)
-    return out
-
-
-async def _fetch_proxy_exit_identity_via_playwright(
-    page: Page,
-) -> tuple[str, str, str, str] | None:
-    """Return (timezone, source_label, exit_ip, country) using the context proxy.
-
-    Uses Playwright's APIRequestContext so traffic matches the browser's proxy
-    tunnel (same exit IP Camoufox targets with geoip=True).
+async def _probe_proxy_timezone(proxy_url: str) -> tuple[str, str, str, str]:
     """
-    request_ctx = page.context.request
-    endpoints: list[tuple[str, str, str, str, str]] = [
-        ("https://ipinfo.io/json", "ipinfo", "ip", "country", "timezone"),
-        (
-            "http://ip-api.com/json/?fields=query,countryCode,timezone",
-            "ip-api",
-            "query",
-            "countryCode",
-            "timezone",
-        ),
+    Detect the proxy's exit IP and return (IANA_timezone, source_label, exit_ip, country).
+
+    source_label is a short string for log display, e.g.:
+        "ipinfo: 82.45.x.x/GB"
+        "ip-api: 1.2.3.4/US"
+
+    Tries two services in order so that a block on one doesn't fail the run:
+      1. ipinfo.io  — HTTPS, proxy-friendly, free 50 k req/month
+      2. ip-api.com — HTTP fallback, very permissive, widely reachable
+
+    Falls back to _DEFAULT_TIMEZONE on any error.
+    """
+    _ENDPOINTS = [
+        # (url, service_name, ip_key, country_key, tz_key)
+        ("https://ipinfo.io/json",                                    "ipinfo",  "ip",    "country",     "timezone"),
+        ("http://ip-api.com/json/?fields=query,countryCode,timezone", "ip-api",  "query", "countryCode", "timezone"),
     ]
-    last_exc: BaseException | None = None
-    for url, svc, ip_key, country_key, tz_key in endpoints:
+    last_exc: Exception | None = None
+    for url, svc, ip_key, country_key, tz_key in _ENDPOINTS:
         try:
-            resp = await request_ctx.get(url, timeout=15_000)
-            if resp.status >= 400:
-                continue
-            data = await resp.json()
-            exit_ip = data.get(ip_key, "?")
-            country = data.get(country_key, "?")
-            timezone = data.get(tz_key) or _DEFAULT_TIMEZONE
-            source = f"{svc}: {exit_ip}/{country}"
-            Actor.log.info(
-                f"  Proxy exit IP: {exit_ip} | country={country} | "
-                f"timezone={timezone} ({svc})"
-            )
+            async with httpx.AsyncClient(proxy=proxy_url, timeout=15.0) as client:
+                resp = await client.get(url)
+                data = resp.json()
+            exit_ip  = data.get(ip_key,      "?")
+            country  = data.get(country_key, "?")
+            timezone = data.get(tz_key)      or _DEFAULT_TIMEZONE
+            source   = f"{svc}: {exit_ip}/{country}"
+            Actor.log.info(f"  Proxy exit IP: {exit_ip} | country={country} | timezone={timezone} ({svc})")
             return timezone, source, exit_ip, country
-        except BaseException as exc:
+        except Exception as exc:
             last_exc = exc
-            Actor.log.debug(f"  Proxy identity via {url} failed: {exc} — trying next …")
+            Actor.log.debug(f"  Timezone probe via {url} failed: {exc} — trying next …")
 
     Actor.log.warning(
-        f"  Could not fetch proxy exit identity via Playwright ({last_exc}) — "
-        f"using default timezone label {_DEFAULT_TIMEZONE}"
+        f"  All proxy IP probes failed ({last_exc}) — "
+        f"falling back to default timezone: {_DEFAULT_TIMEZONE}"
     )
-    return None
+    return _DEFAULT_TIMEZONE, "probe-failed: default", "?", "?"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -123,10 +126,14 @@ class CamoufoxPlugin(PlaywrightBrowserPlugin):
     Keys: needs_log (bool), vp (dict), session_tz, session_src, exit_ip, exit_country.
 
     proxy_url_getter is an optional async callable (() -> str | None) that
-    returns the current session's proxy URL.  When provided, Camoufox is
-    launched with that proxy plus geoip=True so fingerprint/geo match the
-    exit IP.  Detailed IP/country/timezone logs are produced in handle_place
-    via Playwright's APIRequestContext (same proxy as the page).
+    returns the current session's proxy URL.  When provided:
+      • The URL is passed to Camoufox as geoip=<url> so the browser's timezone,
+        geolocation, and related fingerprint fields are automatically set to
+        match the proxy's exit IP — eliminating the mismatch that DataDome and
+        similar bot-protection systems detect.
+      • A lightweight IP-info probe (_probe_proxy_timezone) is run concurrently
+        with the browser launch so we get the "Proxy exit IP" log line without
+        adding extra round-trip latency.
     """
 
     def __init__(
@@ -155,35 +162,41 @@ class CamoufoxPlugin(PlaywrightBrowserPlugin):
         }
         launch_options["headless"] = is_headless
         if proxy_url:
-            try:
-                launch_options["proxy"] = _apify_proxy_url_to_playwright_proxy(proxy_url)
-            except ValueError as exc:
-                Actor.log.warning(f"  Invalid proxy URL for Camoufox launch: {exc}")
-            else:
-                launch_options["geoip"] = True
+            # Probe the proxy exit IP first — Camoufox's geoip parameter expects a
+            # plain IP address string (e.g. "177.97.200.207"), NOT a proxy URL.
+            # We need the exit IP before we can set geoip=, so probing is sequential.
+            probe_tz, probe_src, probe_ip, probe_country = (
+                await _probe_proxy_timezone(proxy_url)
+            )
+            if probe_ip != "?":
+                # Pass the actual exit IP so Camoufox looks it up in the local
+                # MaxMind database and auto-configures timezone, geolocation, etc.
+                launch_options["geoip"] = probe_ip
 
             try:
                 browser = await AsyncNewBrowser(self._playwright, **launch_options)
-            except (NotInstalledGeoIPExtra, InvalidIP, InvalidProxy) as exc:
-                Actor.log.warning(
-                    f"  camoufox geoip/proxy setup failed ({type(exc).__name__}: {exc}) — "
-                    "retrying launch without browser-level proxy/geoip "
-                    "(Crawlee still applies proxy on the context)."
-                )
-                launch_options.pop("geoip", None)
-                launch_options.pop("proxy", None)
-                browser = await AsyncNewBrowser(self._playwright, **launch_options)
+            except Exception as exc:
+                exc_name = type(exc).__name__
+                if exc_name in ("NotInstalledGeoIPExtra", "InvalidIP"):
+                    Actor.log.warning(
+                        f"  camoufox geoip unavailable ({exc_name}) — "
+                        "launching without geoip (timezone will not match proxy)."
+                    )
+                    launch_options.pop("geoip", None)
+                    browser = await AsyncNewBrowser(self._playwright, **launch_options)
+                else:
+                    raise
         else:
+            probe_tz, probe_src, probe_ip, probe_country = (
+                _DEFAULT_TIMEZONE, "no-proxy", "?", "?"
+            )
             browser = await AsyncNewBrowser(self._playwright, **launch_options)
 
-        # handle_place fills session_tz / exit_* via Playwright after the page exists.
+        # Cache probe results so handle_place can log them without a second call.
         self._browser_state.update(
-            vp=vp,
-            needs_log=True,
-            session_tz=_DEFAULT_TIMEZONE,
-            session_src="pending",
-            exit_ip="?",
-            exit_country="?",
+            vp=vp, needs_log=True,
+            session_tz=probe_tz, session_src=probe_src,
+            exit_ip=probe_ip, exit_country=probe_country,
         )
         return PlaywrightBrowserController(
             browser=browser,

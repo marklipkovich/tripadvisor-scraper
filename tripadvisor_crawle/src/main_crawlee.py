@@ -34,7 +34,7 @@ Architecture: PlaywrightCrawler + CamoufoxPlugin (shared browser+context).
 
 Module layout
 ─────────────
-  browser.py   — CamoufoxPlugin, proxy utilities, VIEWPORTS
+  browser.py   — CamoufoxPlugin, proxy timezone probe, VIEWPORTS
   parsers.py   — JSON-LD / GraphQL parsing, EXTRACT_PAGE_SCRIPT
   graphql.py   — fetch_reviews_via_graphql, pagination constants
   utils.py     — with_retry, URL helpers, _normalize_place, _build_places_md
@@ -58,7 +58,6 @@ from crawlee.proxy_configuration import ProxyConfiguration as CrawleeProxyConfig
 
 from .browser import (
     _DEFAULT_TIMEZONE,
-    _fetch_proxy_exit_identity_via_playwright,
     _find_browser_controller,
     CamoufoxPlugin,
     CaptchaBlockedError,
@@ -187,9 +186,8 @@ async def main() -> None:
 
         if apify_proxy_config is not None:
             Actor.log.info(
-                "Browser geoip: Camoufox geoip=True (browser-level proxy) matches "
-                "timezone/geolocation to the residential exit IP; "
-                "logs use Playwright requests through the same proxy."
+                "Browser geoip: timezone, geolocation, and fingerprint will be "
+                "auto-matched to the proxy exit IP via camoufox geoip"
             )
         else:
             Actor.log.info(f"No proxy — browser timezone: {_DEFAULT_TIMEZONE} (default)")
@@ -215,9 +213,11 @@ async def main() -> None:
         seq_counter = [0]            # increments once per unique URL (retries reuse same number)
         url_seq: dict[str, int] = {} # url → sequential processing-order number
 
-        # Shared state written by CamoufoxPlugin.new_browser() and handle_place.
-        # session_* / exit_* come from Playwright APIRequestContext (ipinfo/ip-api)
-        # once per browser session, then re-logged from cache for later places.
+        # Shared state written by CamoufoxPlugin.new_browser() so handle_place
+        # knows when a fresh browser was launched and can emit the session log.
+        # Fields prefixed with session_* / exit_* are the cached values from the
+        # last proxy probe; they are re-logged for every place so the user can see
+        # which session/IP is in use even when the browser is being reused.
         browser_state: dict = {
             "needs_log": False,
             "vp": VIEWPORTS[0],
@@ -277,37 +277,29 @@ async def main() -> None:
             total_places = len(place_urls)
 
             # ── Session log (emitted for every place and every retry) ───────
-            session_id = f"run_s{_session_rotation[0] + 1}"
-            vp = browser_state["vp"]
-
-            if crawlee_proxy_config is not None and (
-                browser_state["needs_log"] or browser_state["exit_ip"] == "?"
-            ):
-                fetched = await _fetch_proxy_exit_identity_via_playwright(context.page)
-                if fetched:
-                    tz, src, ip, cty = fetched
-                    browser_state.update(
-                        session_tz=tz,
-                        session_src=src,
-                        exit_ip=ip,
-                        exit_country=cty,
-                    )
-
-            session_tz = browser_state["session_tz"]
-            session_src = browser_state["session_src"]
-            exit_ip = browser_state["exit_ip"]
+            # new_browser() already ran the proxy probe and cached the results in
+            # browser_state (probe + geoip browser launch ran concurrently there).
+            # Here we just read the cache and log — no extra HTTP round-trip.
+            session_id   = f"run_s{_session_rotation[0] + 1}"
+            vp           = browser_state["vp"]
+            session_tz   = browser_state["session_tz"]
+            session_src  = browser_state["session_src"]
+            exit_ip      = browser_state["exit_ip"]
             exit_country = browser_state["exit_country"]
 
             if browser_state["needs_log"]:
+                # New browser — "Proxy exit IP:" was already logged by
+                # _probe_proxy_timezone inside new_browser(); log "Launching browser:".
                 browser_state.update(needs_log=False, session_id=session_id)
                 Actor.log.info(
                     f"  Launching browser: os=windows | tz={session_tz} [geoip+{session_src}] | "
                     f"{vp['width']}×{vp['height']} | session={session_id}"
                 )
             else:
+                # Reused browser — re-log cached values for per-place visibility.
                 session_id = browser_state["session_id"]
                 if exit_ip != "?":
-                    svc = session_src.split(":")[0] if ":" in session_src else session_src
+                    svc = session_src.split(":")[0]
                     Actor.log.info(
                         f"  Proxy exit IP: {exit_ip} | country={exit_country} | "
                         f"timezone={session_tz} ({svc})"
