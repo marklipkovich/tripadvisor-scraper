@@ -54,7 +54,7 @@ python -m camoufox fetch
 - **Apify Cloud runs** — an [Apify account](https://apify.com/) and [Apify Proxy](https://docs.apify.com/platform/proxy) with a **residential** group for anything beyond quick local experiments; DataDome typically blocks **datacenter** IPs.
 - **Optional** — [Apify CLI](https://docs.apify.com/cli) (`apify run`, `apify push`) if you mirror the Actor layout.
 
-After hitting walls with standard headless Chromium approaches, I ended up with a solution built around Crawlee, a custom Camoufox **browser plugin**, and TripAdvisor's internal [GraphQL](https://graphql.org) API. The rest of the article walks through what I built, what broke, and what I’d do differently next time.
+After hitting walls with standard headless Chromium approaches, I ended up with a solution built around Crawlee, a custom Camoufox browser plugin, and TripAdvisor's internal [GraphQL](https://graphql.org) API. The rest of the article walks through what I built, what broke, and what I’d do differently next time.
 
 ## What the Actor does
 
@@ -108,7 +108,7 @@ Here's exactly what to do:
 8. Open the **Payload**, **Response**, and **Preview** sub-tabs to see the JSON and copy the contents into text files for your notes
 9. Right-click the request → **Copy → Copy as cURL (bash)**. The cURL command includes the URL, headers, and **Payload** (JSON body).
 
-With `Payload.txt`, `Response.txt`, `cURL.txt`, and `Headers.txt` saved from DevTools, we have everything needed to build the code.
+With `Payload.txt`, `Response.txt`, `cURL.txt`, and `Headers.txt` saved from DevTools, I have everything needed to build the code.
 
 ### Payload
 
@@ -117,7 +117,7 @@ TripAdvisor uses a `preRegisteredQueryId` pattern — one endpoint that handles 
 **Query ID:** `ef1a9f94012220d3`
 
 :::note
-There are several query IDs on this endpoint. `ef1a9f94012220d3` is the reviews query we need.
+There are several query IDs on this endpoint. `ef1a9f94012220d3` is the reviews query.
 :::
 
 The payload captured from DevTools:
@@ -174,11 +174,12 @@ async def fetch_reviews_via_graphql(
     payload = [
         {"variables": variables, "extensions": {"preRegisteredQueryId": REVIEWS_QUERY_ID}}
     ]
+    # ... the payload is then passed to page.evaluate() — see § cURL command and endpoint
 ```
 
 ### Response structure
 
-The response key we want is `ReviewsProxy_getReviewListPageForLocation`:
+The response key is `ReviewsProxy_getReviewListPageForLocation`:
 
 - **Response key:** `ReviewsProxy_getReviewListPageForLocation` (not `CommunityUGC__locationTips` or Q&A keys)
 - **Structure:** `data.ReviewsProxy_getReviewListPageForLocation[0]` → `reviews[]`, `totalCount`
@@ -242,6 +243,7 @@ A sample of the raw GraphQL response (from `response.json`), trimmed of internal
 The response parsing first locates the review list — TripAdvisor occasionally changes which sub-key it appears under — then extracts each field with fallbacks for alternative key names:
 
 ```python
+# inner = response[0]["data"]  —  top-level dict from the GraphQL response
 # ReviewsProxy_getReviewListPageForLocation (from devtools/Response.txt)
 reviews_proxy = inner.get("ReviewsProxy_getReviewListPageForLocation")
 if isinstance(reviews_proxy, list) and reviews_proxy:
@@ -321,12 +323,13 @@ curl 'https://www.tripadvisor.com/data/graphql/ids' \
   --data-raw '[{"variables":{...},"extensions":{"preRegisteredQueryId":"ef1a9f94012220d3"}}]'
 ```
 
-In the Actor, we replicate this from within the browser using `page.evaluate()`. The Python call wrapping the JavaScript `fetch()`:
+In the Actor, I replicate this from within the browser using `page.evaluate()`. The Python call wrapping the JavaScript `fetch()`:
 
 ```python
 url = "https://www.tripadvisor.com/data/graphql/ids"
 try:
     result = await page.evaluate(
+        """
         async (args) => {
             const resp = await fetch(args.url, {
                 method: 'POST',
@@ -342,6 +345,12 @@ try:
             if (!resp.ok) return null;
             return await resp.json();
         }
+        """,
+        {"url": url, "payload": payload},
+    )
+except Exception as e:
+    Actor.log.error(f"GraphQL fetch failed: {e}")
+    result = None
 ```
 
 ### Request headers
@@ -357,31 +366,8 @@ origin: https://www.tripadvisor.com
 referer: https://www.tripadvisor.com/Hotel_Review-g190327-d264936-Reviews-1926_Le_Soleil_Hotel_Spa-Sliema_Island_of_Malta.html
 ```
 
-In the `page.evaluate()` call, `credentials: 'include'` ensures the browser's session cookies are sent automatically, and `Referer: window.location.href` mirrors the current page URL — matching what the DevTools headers show:
+In the `page.evaluate()` call, `credentials: 'include'` ensures the browser's session cookies are sent automatically, and `Referer: window.location.href` mirrors the current page URL — matching what the DevTools headers show.
 
-
-```python
-result = await page.evaluate(
-    """
-    async (args) => {
-        const resp = await fetch(args.url, {
-            method: 'POST',
-            credentials: 'include',
-            headers: {
-                'Content-Type': 'application/json',
-                'Accept': '*/*',
-                'Origin': 'https://www.tripadvisor.com',
-                'Referer': window.location.href,
-            },
-            body: JSON.stringify(args.payload),
-        });
-        if (!resp.ok) return null;
-        return await resp.json();
-    }
-    """,
-    {"url": url, "payload": payload},
-)
-```
 This is the core technique. TripAdvisor's GraphQL API validates session cookies and CSRF state, so calling it directly from Python with `httpx` or `requests` doesn't work reliably. Instead, I run a `fetch()` call from inside the Playwright page using `page.evaluate()`. This inherits all the browser's cookies — including any DataDome approval cookies — with no manual authentication needed.
 
 The request runs in JavaScript inside the browser context. Clean, structured JSON comes back directly. This pattern works for any site where the API relies on session cookies that are difficult to replicate externally.
@@ -399,7 +385,7 @@ browser = await AsyncNewBrowser(
 
 With `headless=False`, the browser window stays visible during the run, which helps with debugging — you can watch pages load, see captchas appear, and follow each navigation step. Switch it back to `headless=True` when testing is done.
 
-For local run we should use `INPUT.json` at `storage/key_value_stores/default/INPUT.json`:
+For local runs, use `INPUT.json` at `storage/key_value_stores/default/INPUT.json`:
 
 ```json
 {
@@ -459,12 +445,6 @@ while True:
 ```
 
 I tested 40, 50, 60, and 100 parallel requests. Beyond 50, runtime didn't improve and blocking probability increased. 50 is the practical sweet spot for this endpoint.
-
-The advantages of this approach over HTML parsing:
-- **Clean data** — JSON is structured; avoids fragile CSS selectors
-- **Performance** — 50 concurrent requests vs. scrolling and parsing DOM one page at a time
-- **Stability** — TripAdvisor can rearrange HTML without affecting the API contract
-- **Scale** — no hard cap from HTML pagination; can reach thousands of reviews per place
 
 ## 3. Move to Camoufox
 
@@ -541,7 +521,6 @@ class CamoufoxPlugin(PlaywrightBrowserPlugin):
 
     @override
     async def new_browser(self) -> PlaywrightBrowserController:
-        vp = random.choice(VIEWPORTS)
         is_headless = os.environ.get("APIFY_IS_AT_HOME") == "1"
 
         launch_options = {
@@ -596,12 +575,14 @@ crawler = PlaywrightCrawler(
 
 Key settings:
 - `max_concurrency=1` — one place at a time; one browser reused for all places (crucial for DataDome cookie accumulation — see anti-blocking section below)
-- `retry_on_blocked=False` — we handle DataDome blocks ourselves via `CaptchaBlockedError`
+- `retry_on_blocked=False` — I handle DataDome blocks myself via `CaptchaBlockedError`
 - `ignore_http_error_status_codes=[403, 429, 503]` — let Camoufox handle these instead of Crawlee aborting immediately
+
+The `geoip=True` option and proxy-at-launch pattern in `CamoufoxPlugin` are explained in detail in [§7 Anti-blocking measures](#7-anti-blocking-measures).
 
 ## 4. Move to Apify Cloud
 
-### Deploy to Apify
+Deploy with:
 
 ```bash
 apify push
@@ -625,7 +606,7 @@ Without residential proxy, DataDome blocks datacenter IPs regardless of browser 
 
 ## 5. Output samples
 
-After a successful run, the Actor produces two datasets.
+After a successful run, the Actor produces two datasets. Field names in the parsing code use snake_case; the output JSON uses camelCase — the Actor normalises them during output construction.
 
 **Places** (Key-Value Store, `places.json`):
 
@@ -635,7 +616,7 @@ After a successful run, the Actor produces two datasets.
     "id": "264939",
     "url": "https://www.tripadvisor.com/Hotel_Review-g190327-d264939-Reviews-The_Waterfront_Hotel-Sliema_Island_of_Malta.html",
     "name": "The Waterfront Hotel",
-    "place_type": "LodgingBusiness",
+    "placeType": "LodgingBusiness",
     "rating": "4.4",
     "totalReviews": 3876,
     "scrapedReviews": 600,
@@ -643,7 +624,7 @@ After a successful run, the Actor produces two datasets.
     "city": "Sliema",
     "region": "",
     "country": "MT",
-    "price_range": "$ (Based on Average Nightly Rates for a Standard Room from our Partners)",
+    "priceRange": "$ (Based on Average Nightly Rates for a Standard Room from our Partners)",
     "image": "https://dynamic-media-cdn.tripadvisor.com/media/photo-o/2a/52/68/5d/the-waterfront-hotel.jpg?w=500&h=-1&s=1",
     "ratingDistribution": null,
     "oldestDate": "2025-08-17",
@@ -667,7 +648,8 @@ After a successful run, the Actor produces two datasets.
     "lang": "en",
     "reviewerName": "Stephen O",
     "helpfulVotes": 0,
-    "placeUrl": "https://www.tripadvisor.com/Hotel_Review-g190327-d264939-Reviews-The_Waterfront_Hotel-Sliema_Island_of_Malta.html"
+    "placeUrl": "https://www.tripadvisor.com/Hotel_Review-g190327-d264939-Reviews-The_Waterfront_Hotel-Sliema_Island_of_Malta.html",
+    "managementResponse": null
   }
 ]
 ```
@@ -678,9 +660,9 @@ After I had the basic version working, I profiled it and found 22–66 seconds o
 
 ### `domcontentloaded` instead of `networkidle`
 
-After navigating to a URL, many Playwright setups wait until the page seems "settled" — often using `networkidle`, which means no network activity for about 500ms. On TripAdvisor, ads and analytics keep opening connections indefinitely, so reaching that idle state can easily add 10–20 seconds per place with little benefit for our use case.
+After navigating to a URL, many Playwright setups wait until the page seems "settled" — often using `networkidle`, which means no network activity for about 500ms. On TripAdvisor, ads and analytics keep opening connections indefinitely, so reaching that idle state can easily add 10–20 seconds per place with little benefit for my use case.
 
-We only need the page shell, cookies/session, and a DOM we can interact with so our in-page GraphQL fetch calls work. `domcontentloaded` fires as soon as the HTML is parsed and the DOM is ready — JavaScript may still be running and resources still loading, but the structure is there. We can navigate, click the Reviews tab, and run GraphQL fetches without waiting for the network to go quiet.
+I only need the page shell, cookies/session, and a DOM to interact with so the in-page GraphQL fetch calls work. `domcontentloaded` fires as soon as the HTML is parsed and the DOM is ready — JavaScript may still be running and resources still loading, but the structure is there. I can navigate, click the Reviews tab, and run GraphQL fetches without waiting for the network to go quiet.
 
 ```python
 # domcontentloaded instead of networkidle
@@ -726,13 +708,13 @@ await page.evaluate("window.scrollBy(0, 400)")
 await asyncio.sleep(random.uniform(0.5, 1.0))
 ```
 
-With a DOM-based approach you'd depend on lazy-loading: scroll repeatedly (`window.scrollBy(0, 500)`, many times), with delays of 1–2 seconds between each step so lazy scripts and requests can fire. Since we use GraphQL with offsets, that long scroll became unnecessary for data collection — we don't need the DOM to load every review card. Only the small nudge remained as a behavioural signal.
+With a DOM-based approach you'd depend on lazy-loading: scroll repeatedly (`window.scrollBy(0, 500)`, many times), with delays of 1–2 seconds between each step so lazy scripts and requests can fire. Since I use GraphQL with offsets, that long scroll became unnecessary for data collection — I don't need the DOM to load every review card. Only the small nudge remained as a behavioural signal.
 
 **Saves: 15–25s per place.**
 
 ### Captcha self-resolve check
 
-Camoufox is a stealth browser designed to look convincingly like a real user to bot-detection systems. When a DataDome captcha iframe appears, we don't immediately rotate to a new proxy session or start a fresh browser. Instead, we wait — polling once per second for up to 15 seconds to check whether the iframe is still visible:
+Camoufox is a stealth browser designed to look convincingly like a real user to bot-detection systems. When a DataDome captcha iframe appears, I don't immediately rotate to a new proxy session or start a fresh browser. Instead, I wait — polling once per second for up to 15 seconds to check whether the iframe is still visible:
 
 :::note
 Rotating too eagerly means paying the full cost of a cold session (new IP, zero cookies, fresh fingerprint) every time. Waiting a few seconds for Camoufox to pass DataDome's check naturally is almost always cheaper.
@@ -761,7 +743,7 @@ if captcha_seen:
         raise CaptchaBlockedError("DataDome captcha not bypassed with current proxy")
 ```
 
-If the iframe disappears, we treat it as auto-resolved and continue immediately — no wasted retry, no cold new session. If it's still there after 15 seconds, we raise `CaptchaBlockedError` and let Crawlee schedule a retry with a new proxy session.
+If the iframe disappears, I treat it as auto-resolved and continue immediately — no wasted retry, no cold new session. If it's still there after 15 seconds, I raise `CaptchaBlockedError` and let Crawlee schedule a retry with a new proxy session.
 
 **Saves: 0–24s per place when captcha auto-resolves — which it does most of the time with Camoufox + residential proxy.**
 
@@ -771,7 +753,7 @@ If the iframe disappears, we treat it as auto-resolved and continue immediately 
 |---|---|
 | `domcontentloaded` navigation | 5–12s |
 | Block images/fonts/media | 2–5s |
-| Minimal scroll + shorter delays | 15–25s |
+| Minimal scroll | 15–25s |
 | Captcha self-resolve | 0–24s |
 | **Total** | **~22–66s per place** |
 
