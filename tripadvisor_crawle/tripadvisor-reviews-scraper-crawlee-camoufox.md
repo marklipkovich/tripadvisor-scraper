@@ -8,10 +8,6 @@ authors:
 tags: [community]
 ---
 
-:::note
-One of our community members wrote this guide as a contribution to the Crawlee Blog. If you'd like to contribute articles like these, please reach out to us on [Apify's Discord channel](https://discord.com/invite/jyEM2PRvMU).
-:::
-
 This article walks through how I built an [Apify Actor](https://apify.com/store) that scrapes [TripAdvisor](https://www.tripadvisor.com/) for reviews and place metadata, the problems I hit ([DataDome](https://datadome.co/), sessions, proxies), and how I improved performance and solved blocking using [Crawlee](https://crawlee.dev/python), [Camoufox](https://camoufox.com/), and TripAdvisor’s GraphQL API.
 
 **In this article:**
@@ -32,14 +28,7 @@ This article walks through how I built an [Apify Actor](https://apify.com/store)
 Before you follow along, you should have:
 
 - **Python** — 3.10+ recommended (the reference Actor uses **3.12** in its Docker image). Comfortable with **`async`/`await`** helps.
-- **Python packages** — [Crawlee for Python](https://crawlee.dev/python) with **Playwright**, the [Apify SDK for Python](https://docs.apify.com/sdk/python), **httpx**, and **typing-extensions** (Camoufox is installed in [§3 Move to Camoufox](#3-move-to-camoufox)). Pin roughly like this:
-
-```text
-apify ~= 3.3.0
-crawlee[playwright] ~= 1.5.0
-httpx ~= 0.28.1
-typing-extensions ~= 4.15.0
-```
+- **Python packages** — [Crawlee for Python](https://crawlee.dev/python) with **Playwright**, the [Apify SDK for Python](https://docs.apify.com/sdk/python), **httpx**, and **typing-extensions** (Camoufox is installed in [§3 Move to Camoufox](#3-move-to-camoufox)).
 
 Install in a virtual environment:
 
@@ -47,12 +36,17 @@ Install in a virtual environment:
 pip install "apify~=3.3.0" "crawlee[playwright]~=1.5.0" "httpx~=0.28.1" "typing-extensions~=4.15.0"
 ```
 
+- **Node.js** — required for the [Apify CLI](https://docs.apify.com/cli) (local `apify run`, `apify push`, `apify create`).
+- **Apify CLI** — install globally:
+
+```bash
+npm install -g apify-cli
+```
+
+- **Apify account** — if you use cloud features later ([sign up](https://apify.com/)), run `apify login` so the CLI can push and talk to the platform.
 - **Browser DevTools** — **Chrome** or **Edge** (F12 → **Network**). You will inspect **Fetch/XHR** and copy requests as **cURL** before writing scraping code.
 - **TripAdvisor in the browser** — a normal place URL on `tripadvisor.com` to reproduce the network calls (hotel, restaurant, or attraction).
-- **Apify Cloud runs** — an [Apify account](https://apify.com/) and [Apify Proxy](https://docs.apify.com/platform/proxy) with a **residential** group for anything beyond quick local experiments; DataDome typically blocks **datacenter** IPs.
-- **Optional** — [Apify CLI](https://docs.apify.com/cli) (`apify run`, `apify push`) if you mirror the Actor layout.
-
-After hitting walls with standard headless Chromium approaches, I ended up with a solution built around Crawlee, a custom Camoufox browser plugin, and TripAdvisor's internal [GraphQL](https://graphql.org) API. The rest of the article walks through what I built, what broke, and what I’d do differently next time.
+- **Apify Cloud runs** — [Apify Proxy](https://docs.apify.com/platform/proxy) with a **residential** group for anything beyond quick local experiments; DataDome typically blocks **datacenter** IPs.
 
 ## What the Actor does
 
@@ -324,6 +318,8 @@ curl 'https://www.tripadvisor.com/data/graphql/ids' \
 In the Actor, I replicate this from within the browser using `page.evaluate()`. The Python call wrapping the JavaScript `fetch()`:
 
 ```python
+from apify import Actor
+
 url = "https://www.tripadvisor.com/data/graphql/ids"
 try:
     result = await page.evaluate(
@@ -372,6 +368,8 @@ The request runs in JavaScript inside the browser context. Clean, structured JSO
 
 ## 2. Run code locally
 
+If you are starting from scratch, `apify create actor-name` will create a new subdirectory for the new project, containing all the necessary files. (You can add `-t template_id` to start from a template — see [Creating Actors](https://docs.apify.com/academy/getting-started/creating-actors) in the Apify Academy.)
+
 For local runs, temporarily set `headless=False` to watch the browser:
 
 ```python
@@ -408,6 +406,9 @@ apify run
 Each request returns exactly 10 reviews. To scrape 500 reviews efficiently, I run batches of 50 concurrent requests using `asyncio.gather()`:
 
 ```python
+import asyncio
+import random
+
 PARALLEL_REQUESTS = 50
 reviews_per_page = 10
 reviews_offset = 0
@@ -454,6 +455,9 @@ DataDome detected the headless Chromium fingerprint. I could solve it locally wi
 
 ```python
 # Find slider, drag to the right
+from playwright.async_api import Page
+page: Page
+
 slider = page.locator('[data-testid="slider"]')
 box = await slider.bounding_box()
 await page.mouse.move(box['x'], box['y'] + box['height'] / 2)
@@ -557,6 +561,11 @@ class CamoufoxPlugin(PlaywrightBrowserPlugin):
 The `PlaywrightCrawler` setup:
 
 ```python
+from datetime import timedelta
+from crawlee import ConcurrencySettings
+from crawlee.browsers import BrowserPool, PlaywrightBrowserPlugin, PlaywrightCrawler
+class CamoufoxPlugin(PlaywrightBrowserPlugin):
+
 browser_pool = BrowserPool(
     plugins=[CamoufoxPlugin(
         browser_state=browser_state,
@@ -671,6 +680,10 @@ I only need the page shell, cookies/session, and a DOM to interact with so the i
 
 ```python
 # domcontentloaded instead of networkidle
+from playwright.async_api import Page
+page: Page
+from apify import Actor
+
 Actor.log.info("  Navigating …")
 try:
     await with_retry(
@@ -709,6 +722,8 @@ DataDome's bot detection is based on browser fingerprint properties (TLS, WebGL,
 `window.scrollBy(0, 400)` moves the page 400 pixels down (0 horizontal) as a single, light human-like nudge:
 
 ```python
+import random
+
 await page.evaluate("window.scrollBy(0, 400)")
 await asyncio.sleep(random.uniform(0.5, 1.0))
 ```
@@ -726,6 +741,11 @@ Rotating too eagerly means paying the full cost of a cold session (new IP, zero 
 :::
 
 ```python
+from apify import Actor
+import asyncio
+class CaptchaBlockedError(Exception):
+"""Raised when DataDome captcha cannot be bypassed with the current proxy."""
+    
 if captcha_seen:
     captcha_resolved = False
     for _ in range(15):
@@ -779,46 +799,59 @@ The proxy was exiting in Brazil, but the browser had no timezone set and reporte
 
 ![DataDome captcha triggered by a timezone/locale mismatch between proxy and browser](./tripadvisor-reviews-scraper-python-crawlee-camoufox-images/captcha-detected-without-geoip.png)
 
-The fix is to pass the proxy to Camoufox at **browser launch** (not at context creation), with `geoip=True`. Camoufox then makes a quick request through the proxy tunnel to discover the exit IP's country and timezone, and wires the browser's timezone, geolocation, and locale to match before the browser fully starts.
-
-There is an important architectural constraint here: Camoufox has to look up "which country is this IP?" before the browser fully starts. If you only set the proxy on `new_context()` — which is how Crawlee normally injects proxies — Camoufox's early lookup goes out through the server's own internet connection instead of the proxy tunnel. It resolves the wrong IP, wires the browser to the wrong timezone, and the mismatch gets flagged. The proxy must be set at browser launch for GeoIP to work correctly.
+The fix is to match the browser's timezone, geolocation, and locale to the proxy's actual exit IP before the browser starts.
+Camoufox's `geoip= parameter` accepts a plain IP address string. Pass it the exit IP and Camoufox does a local MaxMind database lookup to configure the browser accordingly — no network request at launch time, no browser-level proxy required. Crawlee continues to inject the proxy at context creation time, as normal.
+Camoufox also accepts `geoip=True`, which lets it probe the exit IP internally. We avoid that here because it requires routing the proxy through the browser at the launch level, which sends all of Firefox's own internal traffic through the residential IP and adds an extra network probe we can't control. Passing the IP string directly is cleaner.
+The approach is straightforward: probe the exit IP yourself with httpx before the browser opens, then hand the result to Camoufox:
 
 ```python
-proxy_url: str | None = None
-if self._proxy_url_getter is not None:
-    proxy_url = await self._proxy_url_getter()
+import httpx
+from apify import Actor
+from crawlee.browsers import PlaywrightBrowserPlugin, PlaywrightBrowserController
 
-launch_options: dict = {
-    "os": "windows",
-    "block_webrtc": True,
-    "locale": "en-US",
-    **self._browser_launch_options,
-}
-launch_options["headless"] = is_headless
-if proxy_url:
-    try:
-        launch_options["proxy"] = _apify_proxy_url_to_playwright_proxy(proxy_url)
-    except ValueError as exc:
-        Actor.log.warning(f"  Invalid proxy URL for Camoufox launch: {exc}")
-    else:
-        launch_options["geoip"] = True
+from camoufox import AsyncNewBrowser
 
-    try:
+async def _probe_proxy_timezone(proxy_url: str) -> tuple[str, str, str, str]:
+    """Return (IANA_timezone, source_label, exit_ip, country) via the proxy."""
+    endpoints = [
+        ("https://ipinfo.io/json",                                    "ipinfo", "ip",    "country",     "timezone"),
+        ("http://ip-api.com/json/?fields=query,countryCode,timezone", "ip-api", "query", "countryCode", "timezone"),
+    ]
+    for url, svc, ip_key, country_key, tz_key in endpoints:
+        try:
+            async with httpx.AsyncClient(proxy=proxy_url, timeout=15.0) as client:
+                data = (await client.get(url)).json()
+            exit_ip  = data.get(ip_key,      "?")
+            country  = data.get(country_key, "?")
+            timezone = data.get(tz_key) or "Europe/London"
+            Actor.log.info(f"Proxy exit IP: {exit_ip} | country={country} | timezone={timezone} ({svc})")
+            return timezone, f"{svc}: {exit_ip}/{country}", exit_ip, country
+        except Exception:
+            continue
+    return "Europe/London", "probe-failed: default", "?", "?"
+
+
+class CamoufoxPlugin(PlaywrightBrowserPlugin):
+
+    async def new_browser(self) -> PlaywrightBrowserController:
+        proxy_url = await self._proxy_url_getter()  # same session ID Crawlee uses
+
+        launch_options = {"os": "windows", "block_webrtc": True, "locale": "en-US"}
+
+        if proxy_url:
+            # Probe the exit IP before the browser opens.
+            _, _, probe_ip, _ = await _probe_proxy_timezone(proxy_url)
+
+            if probe_ip != "?":
+                # Pass the IP string — Camoufox does a local MaxMind lookup only.
+                # No browser-level proxy needed; Crawlee sets it on the context.
+                launch_options["geoip"] = probe_ip
+
         browser = await AsyncNewBrowser(self._playwright, **launch_options)
-    except (NotInstalledGeoIPExtra, InvalidIP, InvalidProxy) as exc:
-        Actor.log.warning(
-            f"  camoufox geoip/proxy setup failed ({type(exc).__name__}: {exc}) — "
-            "retrying without browser-level proxy/geoip "
-            "(Crawlee still applies proxy on the context)."
-        )
-        launch_options.pop("geoip", None)
-        launch_options.pop("proxy", None)
-        browser = await AsyncNewBrowser(self._playwright, **launch_options)
-else:
-    browser = await AsyncNewBrowser(self._playwright, **launch_options)
+        return PlaywrightBrowserController(browser=browser, header_generator=None)
 ```
 
-After adding `geoip=True` at browser launch, the timezone and locale align to the residential exit IP automatically. The "Captcha detected" message no longer appears in the logs.
+After adding `geoip=probe_ip` at browser launch, the timezone and locale align to the residential exit IP automatically. The "Captcha detected" message no longer appears in the logs.
 
 ### Keep the same browser and proxy for all places
 
@@ -848,6 +881,10 @@ The logs showed the proxy IP changing mid-run from `73.244.6.162` to `96.191.113
 The fix:
 
 ```python
+from datetime import timedelta
+from crawlee.browsers import BrowserPool, PlaywrightBrowserPlugin
+class CamoufoxPlugin(PlaywrightBrowserPlugin):
+...
 browser_pool = BrowserPool(
     plugins=[CamoufoxPlugin(
         browser_state=browser_state,
@@ -872,6 +909,10 @@ Launching browser: os=windows | tz=Australia/Melbourne [geoip+ipinfo: 139.216.17
 After a DataDome block, wait longer before each retry — reduces pressure on the protection system and gives the session time to cool down. With up to 3 retries, the delays are 3s → 6s → 12s (plus ±1s jitter):
 
 ```python
+from apify import Actor
+import asyncio
+import random
+
 if retry_count > 0:
     # Exponential backoff: 3s, 6s, 12s … with ±1s jitter
     backoff = 3.0 * (2 ** (retry_count - 1)) + random.uniform(0.5, 1.5)
@@ -920,6 +961,6 @@ A few things I learned — and would do differently next time:
 
 **Keep the same proxy and browser session for all places — unless you're actually blocked.** Every scraping guide says "rotate your proxy." For DataDome, rotating on every place is counterproductive. A browser that's passed the challenge carries approval cookies forward to the next place. Rotating resets all that accumulated trust and forces the full challenge to run again on a cold IP. The `browser_inactive_threshold` bug was silently defeating this strategy for me — the browser was being replaced every 45 seconds without any obvious error in the logs.
 
-**Use `geoip=True` and pass the proxy at browser launch, not context creation.** Camoufox needs the proxy's exit IP before the browser starts, so it can align timezone, geolocation, and locale to the residential IP. If you only set the proxy on `new_context()` — which is Crawlee's default — Camoufox's early IP lookup goes through the server's own network, producing a timezone/locale mismatch that DataDome flags immediately.
+**Use `geoip=probe_ip` at browser launch.** Camoufox needs the proxy's exit IP before the browser starts, so it can align timezone, geolocation, and locale to the residential IP. Rather than letting Camoufox probe the IP internally (which requires routing the proxy through the browser at launch), probe it yourself first with a lightweight httpx call, then pass the result as a plain IP string: `launch_options["geoip"] = probe_ip`
 
-You can find the full Actor code in the [GitHub repository](#) and the deployed version on the [Apify Store](#). Questions or improvements? Join the [Crawlee Discord](https://discord.com/invite/jyEM2PRvMU) — 11,000+ developers working through exactly these kinds of problems.
+You can find the full Actor code in the [GitHub repository](https://github.com/marklipkovich/tripadvisor-scraper) and the deployed version on the [Apify Store](#). Questions or improvements? Join the [Discord](https://discord.com/invite/jyEM2PRvMU) — 11,000+ developers working through exactly these kinds of problems.
