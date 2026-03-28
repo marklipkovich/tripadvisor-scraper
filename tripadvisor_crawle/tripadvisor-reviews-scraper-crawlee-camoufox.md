@@ -232,7 +232,7 @@ A sample of the raw GraphQL response (from `response.json`), trimmed of internal
             ...
 ```
 
-I treated `response.json` as the ground truth: the envelope is a list of GraphQL results, each with `data`, and the reviews live under `data.ReviewsProxy_getReviewListPageForLocation[0].reviews`. I implemented that path in `parse_review_from_graphql` in `parsers.py`—walking the same keys you see above, then mapping each review object into the Actor’s output shape (absolute review URL from `reviewDetailPageWrapper`, place fields from `location`, owner reply from `mgmtResponse`, and so on). The extra branches and `.get(...)` fallbacks in the code below aren’t guesswork; they’re there because TripAdvisor sometimes exposes reviews under sibling keys or alternate operations, so the parser still works when the payload isn’t identical to this one capture.
+I treated `response.json` as the ground truth: the envelope is a list of GraphQL results, each with `data`, and the reviews live under `data.ReviewsProxy_getReviewListPageForLocation[0].reviews`. I implemented that path in `parse_review_from_graphql`—walking the same keys you see above, then mapping each review object into the Actor’s output shape (absolute review URL from `reviewDetailPageWrapper`, place fields from `location`, owner reply from `mgmtResponse`, and so on). The extra branches and `.get(...)` fallbacks in the code below aren’t guesswork; they’re there because TripAdvisor sometimes exposes reviews under sibling keys or alternate operations, so the parser still works when the payload isn’t identical to this one capture.
 
 ```python
 def parse_review_from_graphql(data: list) -> list[dict]:
@@ -378,24 +378,32 @@ In the `page.evaluate()` call, `credentials: 'include'` ensures the browser's se
 
 This is the core technique. TripAdvisor's GraphQL API validates session cookies and CSRF state, so calling it directly from Python with `httpx` or `requests` doesn't work reliably. Instead, I run a `fetch()` call from inside the Playwright page using `page.evaluate()`. This inherits all the browser's cookies — including any DataDome approval cookies — with no manual authentication needed.
 
-The request runs in JavaScript inside the browser context. Clean, structured JSON comes back directly. This pattern works for any site where the API relies on session cookies that are difficult to replicate externally.
+The request runs in JavaScript inside the browser context. Clean, structured JSON comes back directly.
 
 ## 2. Run code locally
 
 If you are starting from scratch, `apify create actor-name` will create a new subdirectory for the new project, containing all the necessary files. (You can add `-t template_id` to start from a template — see [Creating Actors](https://docs.apify.com/academy/getting-started/creating-actors) in the Apify Academy.)
 
-For local runs, temporarily set `headless=False` to watch the browser:
+For local runs, you often want a **visible** browser window while debugging. The snippet below is a **generic illustration**
 
 ```python
+# Standalone experiment: visible window — not the Actor entrypoint.
+from playwright.async_api import async_playwright
 from camoufox import AsyncNewBrowser
 
-async def new_browser(self):
-    browser = await AsyncNewBrowser(
-        headless=False,
-    ...
-)
+async def run():
+    async with async_playwright() as pw:
+        browser = await AsyncNewBrowser(
+            pw,
+            headless=False,  # watch navigation, captchas, tab clicks locally
+            os="windows",
+            block_webrtc=True,
+            locale="en-US",
+        )
+        # … open a context/page and scrape …
+        await browser.close()
 ```
-With `headless=False`, the browser window stays visible during the run, which helps with debugging — you can watch pages load, see captchas appear, and follow each navigation step. Switch it back to `headless=True` when testing is done.
+With `headless=False`, the window stays open so you can follow navigation, captchas, and clicks. The Actor itself runs headless in the cloud with the same plugin stack.
 
 For local runs, use `INPUT.json` at `storage/key_value_stores/default/INPUT.json`:
 
@@ -582,7 +590,7 @@ class CamoufoxPlugin(PlaywrightBrowserPlugin):
         if proxy_url:
             # Probe the proxy exit IP first — Camoufox's geoip parameter expects a
             # plain IP address string (e.g. "177.97.200.207"), NOT a proxy URL.
-            # We need the exit IP before we can set geoip=, so probing is sequential.
+            # I need the exit IP before I can set geoip=, so probing is sequential.
             probe_tz, probe_src, probe_ip, probe_country = (
                 await _probe_proxy_timezone(proxy_url)
             )
@@ -644,7 +652,7 @@ from crawlee.crawlers import PlaywrightCrawler
             proxy_configuration=crawlee_proxy_config,
             max_request_retries=max_retries,
             concurrency_settings=ConcurrencySettings(max_concurrency=1, desired_concurrency=1),
-            # Don't let Crawlee intercept bot-protection responses — we handle it ourselves.
+            # Don't let Crawlee intercept bot-protection responses — I handle it myself.
             retry_on_blocked=False,
             configure_logging=False,
             # Ignore HTTP error codes so Camoufox can handle DataDome / captcha responses.
@@ -878,7 +886,7 @@ The proxy was exiting in Brazil, but the browser had no timezone set and reporte
 
 The fix is to match the browser's timezone, geolocation, and locale to the proxy's actual exit IP before the browser starts.
 Camoufox's `geoip= parameter` accepts a plain IP address string. Pass it the exit IP and Camoufox does a local MaxMind database lookup to configure the browser accordingly — no network request at launch time, no browser-level proxy required. Crawlee continues to inject the proxy at context creation time, as normal.
-Camoufox also accepts `geoip=probe_ip`, which lets it probe the exit IP internally. We avoid that here because it requires routing the proxy through the browser at the launch level, which sends all of Firefox's own internal traffic through the residential IP and adds an extra network probe we can't control. Passing the IP string directly is cleaner.
+Camoufox also accepts `geoip=probe_ip`, which lets it probe the exit IP internally. I avoid that here because it requires routing the proxy through the browser at the launch level, which sends all of Firefox's own internal traffic through the residential IP and adds an extra network probe I can't control. Passing the IP string directly is cleaner.
 The approach is straightforward: probe the exit IP yourself with httpx before the browser opens, then hand the result to Camoufox:
 
 ```python
